@@ -41,7 +41,7 @@ Every run prints the exact command to continue:
 | Flag | |
 |---|---|
 | `--plan` / `--act` | Switch mode; persists in the session |
-| `--approve` | Run the pending shell command once |
+| `--approve` | Run the pending shell command once (non-interactive fallback) |
 | `--always-approve` | Run it, and never ask for that exact command again |
 | `--decline [reason]` | Refuse it; with no reason, hands control back to you |
 | `--compact` | Compact the history now |
@@ -53,17 +53,21 @@ Every run prints the exact command to continue:
 
 ### Progress
 
-While a turn runs, stderr carries a live view: the model's own commentary as it works,
-each tool call with its key argument, and a spinner with elapsed time.
+Every run opens with the mode, model and session id, then stderr carries a live view:
+the model's own commentary as it works, each tool call with its key argument, and a
+spinner with elapsed time. The mode is repeated above the resume hint at the end, so it
+is visible whether you are looking at the top or the bottom of a long answer.
 
 ```
+plan mode · claude-opus-5 · session 6effca1b  (switched)
 I'll start by orienting myself in the project.
   list_tree
 A tiny project — let me read everything.
   read_file package.json
-  read_file src/server.js
 ⠹ thinking 4s
 ```
+
+`(switched)` appears only on the run where the mode actually changed.
 
 **stdout is untouched** — still the finished answer, buffered, rendered once as Markdown.
 So `bba "..." | glow` or `> out.md` behaves exactly as before, and the spinner is erased
@@ -137,8 +141,25 @@ transcript mid-turn wastes context and muddles the history it is building.)
 - [ ] **JWT** — stateless, harder to revoke
 ```
 
-`run_bash` never runs anything without you saying so, and the transcript spells out the
-three ways to respond.
+`run_bash` never runs anything without you saying so. On a terminal it asks inline and
+waits for a single keypress, without ending the turn:
+
+```
+run_bash wants to run:
+  npm test
+  Verify the refactor before moving on.
+  [y] run once   [a] always allow this command   [n] decline
+  → approved
+```
+
+`y` runs it and the agent carries on in the same process — no re-invoke, no re-sending
+the history. `a` also appends it to `alwaysApprove` in the config, so it is never asked
+again in any session. Only **`n`** ends the turn, writing a `## Declined` block and
+handing you the editor to say what to do instead.
+
+With no terminal to ask on — piped stdin, a cron job, CI — it falls back to the
+transcript flow instead of hanging: the request is written out and the turn ends, to be
+answered with `--approve`, `--always-approve` or `--decline [reason]` on the next run.
 
 ## Configuration
 
@@ -252,9 +273,10 @@ saved to the session first, so nothing already done is lost.
 
 ## Notes
 
-- `@node-llm/core` 1.17.0's model registry does not yet know `claude-opus-5`, so the
-  agent passes `assumeModelExists` and sets `max_tokens` explicitly. Any newer model id
-  works the same way.
+- `@node-llm/core` 1.17.0's model registry does not know `claude-opus-5`. Rather than
+  skip validation (which drops the output ceiling to 8k and logs a warning every run),
+  the agent registers unknown models with `ModelRegistry.save()` before use, taking
+  their rates from the `pricing` config. Any newer model id works the same way.
 - NodeLLM does not emit `cache_control` itself; unknown params are spread into the
   request body, which is how top-level auto-caching is reached.
 - Its default agentic loop cap is 5 tool rounds (`maxToolCalls`), raised to 50 here.

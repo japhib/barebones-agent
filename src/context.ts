@@ -3,9 +3,12 @@
  * depends on. Kept in its own module so `tools.ts` and `agent.ts` can both import it
  * without a cycle.
  */
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { Message } from "@node-llm/core";
+
+import type { Progress } from "./progress.js";
 
 export const APP_NAME = "barebones-agent";
 export const APP_DIR = path.join(os.homedir(), `.${APP_NAME}`);
@@ -110,12 +113,19 @@ export interface Session {
   usage: Usage;
   pendingQuestion: PendingQuestion | null;
   pendingBash: PendingBash | null;
+  /** Set when the user declines interactively; the turn ends and they get the editor. */
+  declinedCommand: string | null;
   approvedOnce: string[];
 }
 
 export interface Ctx {
   cfg: Config;
   session: Session;
+  progress: Progress;
+}
+
+export function saveConfig(cfg: Config): void {
+  fs.writeFileSync(CONFIG_PATH, `${JSON.stringify(cfg, null, 2)}\n`);
 }
 
 /** Tools are instantiated by NodeLLM from bare classes, so they cannot be handed

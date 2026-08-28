@@ -20,6 +20,7 @@ import {
   cap,
   ctx,
   resolveSafe,
+  saveConfig,
 } from "./context.js";
 
 /** Tool failures are returned to the model as text rather than thrown, so it can
@@ -238,6 +239,66 @@ class AskUserTool extends SafeTool<z.infer<typeof askUserArgs>> {
   }
 }
 
+type Approval = "yes" | "always" | "no";
+const APPROVAL_KEYS: Record<string, Approval> = { y: "yes", a: "always", n: "no" };
+
+/**
+ * Read one keypress from the controlling terminal.
+ *
+ * Raw mode is what makes a single key enough — but it also stops the kernel turning
+ * Ctrl-C into SIGINT, so \x03 has to be handled by hand or the prompt becomes a trap.
+ */
+function readKey(valid: string[]): Promise<string> {
+  return new Promise((resolve) => {
+    const stdin = process.stdin;
+    const wasRaw = stdin.isRaw;
+    let settled = false;
+    const done = (key: string): void => {
+      if (settled) return;
+      settled = true;
+      stdin.off("data", onData);
+      stdin.off("end", onEnd);
+      stdin.setRawMode(wasRaw ?? false);
+      stdin.pause();
+      resolve(key);
+    };
+    // A chunk is not a keystroke: terminals deliver escape sequences, pastes and
+    // stray control bytes in one read, so scan it rather than compare it whole.
+    const onData = (buf: Buffer): void => {
+      for (const ch of buf.toString().toLowerCase()) {
+        if (ch === "\u0003") {
+          done("");
+          process.stderr.write("\n");
+          process.exit(130);
+        }
+        if (valid.includes(ch)) return done(ch);
+      }
+    };
+    // stdin closing with no answer is not consent.
+    const onEnd = (): void => done("");
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdin.on("data", onData);
+    stdin.on("end", onEnd);
+  });
+}
+
+/** Returns null when there is no terminal to ask on; the caller then falls back to
+ *  writing the request into the transcript and ending the turn. */
+async function askApproval(command: string, reason: string): Promise<Approval | null> {
+  if (!process.stdin.isTTY || !process.stderr.isTTY) return null;
+  const { progress } = ctx();
+  progress.stop();
+  process.stderr.write(
+    `\n\x1b[1mrun_bash\x1b[0m wants to run:\n  \x1b[36m${command}\x1b[0m\n  \x1b[2m${reason}\x1b[0m\n` +
+      `  [\x1b[1my\x1b[0m] run once   [\x1b[1ma\x1b[0m] always allow this command   [\x1b[1mn\x1b[0m] decline\n`,
+  );
+  const answer = APPROVAL_KEYS[await readKey(Object.keys(APPROVAL_KEYS))] ?? "no";
+  process.stderr.write(`  \x1b[2m→ ${answer === "no" ? "declined" : answer === "always" ? "always allowed" : "approved"}\x1b[0m\n`);
+  progress.step("run_bash");
+  return answer;
+}
+
 const runBashArgs = z.object({
   command: z.string().describe("The exact shell command to run"),
   reason: z.string().describe("Why this command is needed and what you expect it to show"),
@@ -251,11 +312,27 @@ class RunBashTool extends SafeTool<z.infer<typeof runBashArgs>> {
     this.requireAct();
     const { cfg, session } = ctx();
     const once = session.approvedOnce.indexOf(command);
-    if (!cfg.alwaysApprove.includes(command) && once === -1) {
-      session.pendingBash = { command, reason };
-      return this.halt(`Waiting for the user to approve: ${command}`);
+
+    if (cfg.alwaysApprove.includes(command)) {
+      // already blanket-approved
+    } else if (once !== -1) {
+      session.approvedOnce.splice(once, 1); // a one-shot approval is spent
+    } else {
+      const answer = await askApproval(command, reason);
+      if (answer === null) {
+        // Nothing to prompt on, so fall back to asking through the transcript.
+        session.pendingBash = { command, reason };
+        return this.halt(`Waiting for the user to approve: ${command}`);
+      }
+      if (answer === "no") {
+        session.declinedCommand = command;
+        return this.halt(`The user declined to run \`${command}\`.`);
+      }
+      if (answer === "always") {
+        cfg.alwaysApprove.push(command);
+        saveConfig(cfg);
+      }
     }
-    if (once !== -1) session.approvedOnce.splice(once, 1); // a one-shot approval is spent
     const limit = cfg.bashTimeoutMs;
     const r = spawnSync("bash", ["-lc", command], {
       cwd: CWD,

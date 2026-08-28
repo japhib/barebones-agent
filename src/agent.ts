@@ -7,7 +7,7 @@
  * command — it records the request in the session transcript, saves state, and exits
  * with a hint for re-invoking.
  */
-import { createLLM, type Message } from "@node-llm/core";
+import { ModelRegistry, createLLM, type Message } from "@node-llm/core";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -24,6 +24,7 @@ import {
   DEFAULT_BASH_TIMEOUT_MS,
   DEFAULT_PRICING,
   DEFAULT_REQUEST_TIMEOUT_MS,
+  saveConfig,
   setContext,
   zeroUsage,
   type Config,
@@ -106,10 +107,6 @@ function loadConfig(): Config {
   return cfg;
 }
 
-function saveConfig(cfg: Config): void {
-  fs.writeFileSync(CONFIG_PATH, `${JSON.stringify(cfg, null, 2)}\n`);
-}
-
 function resolveEditor(cliEditor: string | undefined, cfg: Config): string[] {
   const raw = cliEditor
     ? cliEditor.split(/\s+/)
@@ -147,6 +144,7 @@ function newSession(cfg: Config, model: string, mode: Mode): Session {
     usage: zeroUsage(),
     pendingQuestion: null,
     pendingBash: null,
+    declinedCommand: null,
     approvedOnce: [],
   };
 }
@@ -156,6 +154,7 @@ function loadSession(cfg: Config, id: string): Session {
   if (!fs.existsSync(p)) die(`No session "${id}" under ${sessionDir(cfg)}/`);
   const s = JSON.parse(fs.readFileSync(p, "utf8")) as Session;
   s.usage ??= zeroUsage(); // sessions created before usage tracking
+  s.declinedCommand ??= null;
   return s;
 }
 
@@ -386,6 +385,41 @@ function extractMode(prompt: string): { prompt: string; mode: Mode | null } {
   return { prompt: rest || implied, mode };
 }
 
+/**
+ * Teach the registry about a model it does not ship with.
+ *
+ * The bundled registry lags new releases, and an unknown id fails the tool-support
+ * check outright. `assumeModelExists` skips that check but also drops max_output_tokens
+ * to an 8k fallback and logs a warning on every run; registering the model properly
+ * avoids all three problems. Anything newer than the bundled registry is a current
+ * frontier model, hence the 1M/128k defaults.
+ */
+function ensureModelKnown(model: string, cfg: Config): void {
+  if (ModelRegistry.find(model, "anthropic")) return;
+  const price = cfg.pricing[model];
+  ModelRegistry.save({
+    id: model,
+    name: model,
+    provider: "anthropic",
+    family: "claude",
+    context_window: 1_000_000,
+    max_output_tokens: 128_000,
+    modalities: { input: ["text", "image", "pdf"], output: ["text"] },
+    capabilities: ["streaming", "reasoning", "chat", "vision", "function_calling", "tools", "structured_output", "json_mode"],
+    ...(price && {
+      pricing: {
+        text_tokens: {
+          standard: {
+            input_per_million: price.input,
+            output_per_million: price.output,
+            cached_input_per_million: price.cacheRead,
+          },
+        },
+      },
+    }),
+  });
+}
+
 /** Tool inputs arrive as a JSON string; parse it, never string-match it. */
 function describeCall(call: unknown): { name: string; args: string } {
   const c = call as { function?: { name?: string; arguments?: string } };
@@ -509,14 +543,17 @@ async function main(): Promise<void> {
   if (values.model) session.model = values.model;
   if (values.plan) session.mode = "plan";
   if (values.act) session.mode = "act";
-  setContext({ cfg, session });
+  const progress = new Progress(!values.quiet);
+  setContext({ cfg, session, progress });
 
   const resume = `${invocation()} -s ${session.id}`;
 
   if (values.usage) {
     // Read-only: report what the session has spent without calling the model.
     process.stdout.write(`${formatUsage("session", session.usage)}\n`);
-    process.stdout.write(`         across ${session.usage.turns} turn${session.usage.turns === 1 ? "" : "s"}\n`);
+    process.stdout.write(
+      `         across ${session.usage.turns} turn${session.usage.turns === 1 ? "" : "s"} · ${session.mode} mode · ${session.model}\n`,
+    );
     return;
   }
   let prompt = "";
@@ -580,17 +617,19 @@ async function main(): Promise<void> {
   if (directive.mode) session.mode = directive.mode;
   session.pendingQuestion = null;
 
+  if (!values.quiet) {
+    const switched = directive.mode || values.plan || values.act ? "  (switched)" : "";
+    process.stderr.write(dim(`${session.mode} mode · ${session.model} · session ${session.id}${switched}`) + "\n");
+  }
+
   // --- run ----------------------------------------------------------------
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) die("ANTHROPIC_API_KEY is not set.");
 
+  ensureModelKnown(session.model, cfg);
   const llm = createLLM({ provider: "anthropic", anthropicApiKey: apiKey });
   const chat = llm
     .chat(session.model, {
-      // The bundled model registry lags new releases — claude-opus-5 is missing in
-      // 1.17.0 — and an unknown id otherwise fails the tool-support check outright.
-      // Skipping the check also drops max_tokens to 8k, so set it explicitly.
-      assumeModelExists: true,
       maxTokens: MAX_OUTPUT_TOKENS,
       // The default agentic loop cap is 5 rounds, which a real coding task blows
       // through immediately. (withToolCalls() is a different knob — parallelism.)
@@ -624,7 +663,6 @@ async function main(): Promise<void> {
   // Progress. By the time onToolCallStart fires, the assistant message that requested
   // the call — including any text it wrote first — is already in chat.history, so the
   // model's own running commentary can be surfaced rather than just tool names.
-  const progress = new Progress(!values.quiet);
   let narrated = 0;
   let outstanding = 0;
 
@@ -689,6 +727,14 @@ async function main(): Promise<void> {
   } else if (session.pendingBash) {
     shown = renderApproval(session.pendingBash, session);
     appendTranscript(cfg, session, shown);
+  } else if (session.declinedCommand) {
+    shown = `Declined \`${session.declinedCommand}\`. Tell the agent what to do instead.`;
+    appendTranscript(
+      cfg,
+      session,
+      `\n## Declined\n\n\`${session.declinedCommand}\`\n\n${YOU}\n\n<!-- tell the agent what to do instead -->\n`,
+    );
+    session.declinedCommand = null;
   } else {
     shown = answer;
     const stub = readyToAct && session.mode === "plan" ? ACT_STUB : PROMPT_STUB;
@@ -702,7 +748,7 @@ async function main(): Promise<void> {
     process.stderr.write(`\n${formatUsage("turn", spent)}\n${formatUsage("session", session.usage)}\n`);
   }
   const next = session.pendingBash ? " --approve" : " -e";
-  process.stdout.write(`\n↻  ${resume}${next}\n`);
+  process.stdout.write(`\n${session.mode} mode · continue with:\n↻  ${resume}${next}\n`);
 }
 
 main().catch((err: unknown) => {
