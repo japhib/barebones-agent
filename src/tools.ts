@@ -10,7 +10,6 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
-  BASH_TIMEOUT_MS,
   CONFIG_PATH,
   CWD,
   DEFAULT_TREE_DEPTH,
@@ -257,12 +256,21 @@ class RunBashTool extends SafeTool<z.infer<typeof runBashArgs>> {
       return this.halt(`Waiting for the user to approve: ${command}`);
     }
     if (once !== -1) session.approvedOnce.splice(once, 1); // a one-shot approval is spent
+    const limit = cfg.bashTimeoutMs;
     const r = spawnSync("bash", ["-lc", command], {
       cwd: CWD,
       encoding: "utf8",
-      timeout: BASH_TIMEOUT_MS,
+      timeout: limit,
       maxBuffer: 8 * 1024 * 1024,
     });
+    // spawnSync signals a timeout kill via SIGTERM, sometimes without an error object.
+    if ((r.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT" || r.signal === "SIGTERM") {
+      throw new Error(
+        `Command timed out after ${Math.round(limit / 1000)}s: \`${command}\`. ` +
+          `Tell the user they can retry with a longer limit via --bash-timeout <seconds>, ` +
+          `or suggest a faster command.`,
+      );
+    }
     if (r.error) throw new Error(r.error.message);
     const out = [`exit ${r.status ?? "null"}`];
     if (r.stdout?.trim()) out.push(`--- stdout ---\n${r.stdout.trimEnd()}`);

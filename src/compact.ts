@@ -8,6 +8,9 @@
  */
 import type { Message, NodeLLMCore } from "@node-llm/core";
 
+import type { Usage } from "./context.js";
+import { zeroUsage } from "./context.js";
+
 const SUMMARY_MODEL = "claude-haiku-4-5";
 const MAX_CHARS_PER_MESSAGE = 4000;
 
@@ -25,6 +28,13 @@ and identifiers. Do not editorialise and do not add a preamble.`;
 export interface CompactOptions {
   llm: NodeLLMCore;
   keepRecentTurns: number;
+}
+
+/** The summariser is a real billed request, so it is reported rather than hidden. */
+export interface CompactResult {
+  messages: Message[];
+  usage: Usage;
+  model: string;
 }
 
 /**
@@ -69,16 +79,27 @@ function transcribe(messages: readonly Message[]): string {
     .join("\n\n");
 }
 
-export async function compactHistory(messages: Message[], opts: CompactOptions): Promise<Message[]> {
+export async function compactHistory(messages: Message[], opts: CompactOptions): Promise<CompactResult> {
   const [head, tail] = summarisable(messages, opts.keepRecentTurns);
   const span = messages.slice(head, tail);
-  if (span.length < 2) return messages; // nothing worth the round trip
+  const usage = zeroUsage();
+  if (span.length < 2) return { messages, usage, model: SUMMARY_MODEL }; // not worth the round trip
 
   const res = await opts.llm.chat(SUMMARY_MODEL).withInstructions(SUMMARY_PROMPT).ask(transcribe(span));
 
-  return [
-    ...messages.slice(0, head),
-    { role: "user", content: `## Summary of earlier conversation\n\n${res.content.trim()}` },
-    ...messages.slice(tail),
-  ];
+  usage.input = res.usage.input_tokens ?? 0;
+  usage.cacheRead = res.usage.cached_tokens ?? 0;
+  usage.cacheWrite = res.usage.cache_creation_tokens ?? 0;
+  usage.output = res.usage.output_tokens ?? 0;
+  usage.requests = 1;
+
+  return {
+    messages: [
+      ...messages.slice(0, head),
+      { role: "user", content: `## Summary of earlier conversation\n\n${res.content.trim()}` },
+      ...messages.slice(tail),
+    ],
+    usage,
+    model: SUMMARY_MODEL,
+  };
 }

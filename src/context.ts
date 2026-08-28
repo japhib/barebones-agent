@@ -17,12 +17,37 @@ export const DEFAULT_TREE_DEPTH = 3;
 export const MAX_TREE_DEPTH = 6;
 export const MAX_TREE_ENTRIES = 500;
 export const MAX_TOOL_OUTPUT = 60_000;
-export const BASH_TIMEOUT_MS = 120_000;
+
+/** NodeLLM's own default is 30s, which a reasoning model exploring a real codebase
+ *  blows through routinely. Both are overridable from config and the CLI. */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 600_000;
+export const DEFAULT_BASH_TIMEOUT_MS = 120_000;
 
 export const TREE_SKIP = new Set([".git", "node_modules", "dist", ".agent"]);
 
 export type Mode = "plan" | "act";
 export type Renderer = "auto" | "glow" | "bat" | "none";
+
+/** US dollars per million tokens. cacheWrite is the 1h-TTL rate (2x input); the 5m
+ *  rate would be 1.25x, but this agent always writes with ttl:"1h". */
+export interface ModelPrice {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
+/** Seeded from Anthropic's published rates. Prices change; override per model in
+ *  config under "pricing" rather than editing this. */
+export const DEFAULT_PRICING: Record<string, ModelPrice> = {
+  "claude-opus-5": { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 10 },
+  "claude-opus-4-8": { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 10 },
+  "claude-opus-4-7": { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 10 },
+  "claude-sonnet-5": { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 4 },
+  "claude-sonnet-4-6": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 6 },
+  "claude-haiku-4-5": { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 2 },
+  "claude-fable-5": { input: 10, output: 50, cacheRead: 1, cacheWrite: 20 },
+};
 
 export interface Config {
   model: string;
@@ -32,6 +57,9 @@ export interface Config {
   compactAt: number;
   alwaysApprove: string[];
   tavilyApiKey: string | null;
+  requestTimeoutMs: number;
+  bashTimeoutMs: number;
+  pricing: Record<string, ModelPrice>;
 }
 
 export interface QuestionOption {
@@ -48,6 +76,28 @@ export interface PendingBash {
   reason: string;
 }
 
+/**
+ * Anthropic bills three kinds of input separately, so they are counted separately:
+ * `input` is what was neither cached nor written (1x), `cacheRead` is served from cache
+ * (0.1x), `cacheWrite` is what was stored into it (2x at the 1h TTL we use).
+ */
+export interface Usage {
+  input: number;
+  cacheRead: number;
+  cacheWrite: number;
+  output: number;
+  requests: number;
+  turns: number;
+  /** Accumulated in dollars, not tokens, so a mid-session model switch stays correct. */
+  costUsd: number;
+  /** True while every request counted so far had a known price. */
+  priced: boolean;
+}
+
+export function zeroUsage(): Usage {
+  return { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, requests: 0, turns: 0, costUsd: 0, priced: true };
+}
+
 export interface Session {
   id: string;
   model: string;
@@ -57,6 +107,7 @@ export interface Session {
   announcedMode: Mode | null;
   messages: Message[];
   lastInputTokens: number;
+  usage: Usage;
   pendingQuestion: PendingQuestion | null;
   pendingBash: PendingBash | null;
   approvedOnce: string[];
@@ -91,8 +142,10 @@ export function resolveSafe(p: string): string {
   if (abs !== CWD && !abs.startsWith(CWD + path.sep)) {
     throw new Error(`Refused: "${p}" resolves outside the current directory.`);
   }
-  if (path.relative(CWD, abs).split(path.sep).includes(".git")) {
-    throw new Error(`Refused: "${p}" is inside .git/.`);
-  }
+  // .git is off limits, and so is the agent's own session directory: reading its
+  // own transcript mid-turn wastes context and confuses the history it is building.
+  const guarded = [".git", path.basename(current?.cfg.sessionDir ?? ".agent")];
+  const hit = path.relative(CWD, abs).split(path.sep).find((seg) => guarded.includes(seg));
+  if (hit) throw new Error(`Refused: "${p}" is inside ${hit}/.`);
   return abs;
 }

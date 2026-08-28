@@ -15,18 +15,25 @@ import { spawnSync } from "node:child_process";
 import { parseArgs } from "node:util";
 
 import { compactHistory } from "./compact.js";
+import { Progress, dim } from "./progress.js";
 import { TOOLS } from "./tools.js";
 import {
   APP_DIR,
   CONFIG_PATH,
   CWD,
+  DEFAULT_BASH_TIMEOUT_MS,
+  DEFAULT_PRICING,
+  DEFAULT_REQUEST_TIMEOUT_MS,
   setContext,
+  zeroUsage,
   type Config,
   type Mode,
   type PendingBash,
   type PendingQuestion,
   type Renderer,
+  type ModelPrice,
   type Session,
+  type Usage,
 } from "./context.js";
 
 // ---------------------------------------------------------------- constants
@@ -42,6 +49,10 @@ const GUI_EDITORS = new Set(["code", "code-insiders", "codium", "subl", "zed", "
 const YOU = "## You";
 const PROMPT_STUB = "<!-- type your next prompt below, save, and re-run -->";
 const ANSWER_STUB = "<!-- tick a box above, or just type an answer below -->";
+const ACT_STUB =
+  "<!-- The agent is ready to build this. Write !act on its own line to switch to act\n     mode and proceed, or reply with changes you want first. -->";
+/** The model emits this to say a plan is finished and it wants the go-ahead. */
+const READY_MARKER = "<!-- !act -->";
 
 const DEFAULT_CONFIG: Config = {
   model: "claude-opus-5",
@@ -51,6 +62,9 @@ const DEFAULT_CONFIG: Config = {
   compactAt: 0,
   alwaysApprove: [],
   tavilyApiKey: null,
+  requestTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
+  bashTimeoutMs: DEFAULT_BASH_TIMEOUT_MS,
+  pricing: DEFAULT_PRICING,
 };
 
 // ---------------------------------------------------------------- helpers
@@ -87,6 +101,8 @@ function loadConfig(): Config {
     }
     if (v !== null || k === "tavilyApiKey") (cfg as Record<string, unknown>)[k] = v;
   }
+  // Merge per model, so overriding one rate doesn't drop every other model's.
+  cfg.pricing = { ...DEFAULT_PRICING, ...(raw.pricing as Config["pricing"] | undefined) };
   return cfg;
 }
 
@@ -128,6 +144,7 @@ function newSession(cfg: Config, model: string, mode: Mode): Session {
     announcedMode: null,
     messages: [],
     lastInputTokens: 0,
+    usage: zeroUsage(),
     pendingQuestion: null,
     pendingBash: null,
     approvedOnce: [],
@@ -137,7 +154,9 @@ function newSession(cfg: Config, model: string, mode: Mode): Session {
 function loadSession(cfg: Config, id: string): Session {
   const p = jsonPath(cfg, id);
   if (!fs.existsSync(p)) die(`No session "${id}" under ${sessionDir(cfg)}/`);
-  return JSON.parse(fs.readFileSync(p, "utf8")) as Session;
+  const s = JSON.parse(fs.readFileSync(p, "utf8")) as Session;
+  s.usage ??= zeroUsage(); // sessions created before usage tracking
+  return s;
 }
 
 /** `usage` and `reasoning` vary every turn. Re-sending them would perturb the
@@ -260,6 +279,14 @@ Every path you touch must be inside the current directory.
 Start by orienting yourself with list_tree or search_code rather than assuming a layout.
 Read a file before you edit it. When you change code, match the surrounding style.
 
+When you are in plan mode and the plan is finished and you want the user to go ahead,
+end your response with exactly this line and nothing after it:
+
+<!-- !act -->
+
+That turns the reply the user is about to write into a prompt telling them they can type
+!act to switch to act mode. Only use it when the plan genuinely needs no more input.
+
 Write your final answer as Markdown. Be concise and concrete: reference files as
 path:line, show only the code that matters, and say plainly what you did and what you
 did not do.`;
@@ -272,6 +299,122 @@ function modeMessage(mode: Mode): string {
 
 // ---------------------------------------------------------------- output
 
+/**
+ * What this turn cost, summed over every request the tool loop made.
+ *
+ * NodeLLM hangs `usage` on each assistant message it appends, and we strip that field
+ * before persisting — so whatever carries usage in history right now is exactly this
+ * turn. (chat.totalUsage would be simpler but silently omits cache_creation_tokens.)
+ */
+function turnUsage(history: readonly Message[], price: ModelPrice | undefined): Usage {
+  const u = zeroUsage();
+  for (const m of history) {
+    const x = m.usage;
+    if (!x) continue;
+    u.input += x.input_tokens ?? 0;
+    u.cacheRead += x.cached_tokens ?? 0;
+    u.cacheWrite += x.cache_creation_tokens ?? 0;
+    u.output += x.output_tokens ?? 0;
+    u.requests += 1;
+  }
+  u.turns = 1;
+  return priceUsage(u, price);
+}
+
+/** Prices are per million tokens. An unpriced model still reports tokens; it just
+ *  marks the running total as incomplete rather than quietly adding zero. */
+function priceUsage(u: Usage, price: ModelPrice | undefined): Usage {
+  if (!price) return { ...u, costUsd: 0, priced: u.requests === 0 };
+  u.costUsd =
+    (u.input * price.input +
+      u.cacheRead * price.cacheRead +
+      u.cacheWrite * price.cacheWrite +
+      u.output * price.output) /
+    1_000_000;
+  return u;
+}
+
+function money(usd: number): string {
+  return `$${usd < 1 ? usd.toFixed(4) : usd.toFixed(2)}`;
+}
+
+function addUsage(total: Usage, next: Usage): Usage {
+  return {
+    input: total.input + next.input,
+    cacheRead: total.cacheRead + next.cacheRead,
+    cacheWrite: total.cacheWrite + next.cacheWrite,
+    output: total.output + next.output,
+    requests: total.requests + next.requests,
+    turns: total.turns + next.turns,
+    costUsd: total.costUsd + next.costUsd,
+    priced: total.priced && next.priced,
+  };
+}
+
+const n = (x: number): string => x.toLocaleString("en-US");
+
+function formatUsage(label: string, u: Usage): string {
+  // Anthropic reports input_tokens as the uncached remainder, so the real input
+  // volume is the three categories added together.
+  const totalIn = u.input + u.cacheRead + u.cacheWrite;
+  const hit = totalIn ? Math.round((u.cacheRead / totalIn) * 100) : 0;
+  const cost = u.priced ? money(u.costUsd) : `${money(u.costUsd)}+ (some models unpriced)`;
+  return (
+    `${label.padEnd(8)} in ${n(totalIn)} (${n(u.cacheRead)} cached · ${n(u.cacheWrite)} written · ` +
+    `${n(u.input)} fresh)  out ${n(u.output)}  ·  ${hit}% cached, ` +
+    `${n(u.requests)} request${u.requests === 1 ? "" : "s"}  ·  ${cost}`
+  );
+}
+
+/**
+ * A line that is exactly `!act` or `!plan` switches the session mode and is removed
+ * from the prompt. On its own it means "proceed", so the plan just written becomes the
+ * instruction rather than making the user restate it.
+ */
+function extractMode(prompt: string): { prompt: string; mode: Mode | null } {
+  const lines = prompt.split("\n");
+  let mode: Mode | null = null;
+  const kept = lines.filter((line) => {
+    const directive = line.trim();
+    if (directive === "!act") return (mode = "act"), false;
+    if (directive === "!plan") return (mode = "plan"), false;
+    return true;
+  });
+  const rest = kept.join("\n").trim();
+  if (!mode) return { prompt: rest, mode: null };
+  const implied = mode === "act" ? "Proceed with the plan." : "Re-examine this and produce a plan.";
+  return { prompt: rest || implied, mode };
+}
+
+/** Tool inputs arrive as a JSON string; parse it, never string-match it. */
+function describeCall(call: unknown): { name: string; args: string } {
+  const c = call as { function?: { name?: string; arguments?: string } };
+  const name = c.function?.name ?? "tool";
+  try {
+    const a = JSON.parse(c.function?.arguments ?? "{}") as Record<string, unknown>;
+    const key = a.path ?? a.pattern ?? a.query ?? a.command ?? a.question;
+    return { name, args: key === undefined ? "" : String(key).slice(0, 80) };
+  } catch {
+    return { name, args: "" };
+  }
+}
+
+/** A bare "Request timeout after 30000ms" tells the user nothing about what stalled. */
+function explainFailure(err: unknown, cfg: Config): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  const timeout = /^Request timeout after (\d+)ms$/.exec(msg);
+  if (timeout) {
+    const secs = Math.round(Number(timeout[1]) / 1000);
+    return (
+      `The model API request timed out after ${secs}s. This is the LLM call itself, ` +
+      `not a tool — tools report their own timeouts by name. ` +
+      `Retry with --timeout <seconds>, or raise "requestTimeoutMs" in ${CONFIG_PATH} ` +
+      `(currently ${Math.round(cfg.requestTimeoutMs / 1000)}s).`
+    );
+  }
+  return msg;
+}
+
 function invocation(): string {
   const argv1 = process.argv[1] ?? "";
   if (path.basename(argv1) === "bba") return "bba";
@@ -281,8 +424,17 @@ function invocation(): string {
 }
 
 function render(md: string, cfg: Config): void {
-  const pick: Renderer =
-    cfg.renderer === "auto" ? (have("glow") ? "glow" : have("bat") ? "bat" : "none") : cfg.renderer;
+  let pick: Renderer = cfg.renderer;
+  if (pick === "auto") {
+    pick = have("glow") ? "glow" : have("bat") ? "bat" : "none";
+    // Only worth saying when someone is actually reading the terminal; a piped or
+    // redirected stdout wanted the plain Markdown anyway.
+    if (pick === "none" && process.stdout.isTTY) {
+      process.stderr.write(
+        dim("Neither glow nor bat found — printing plain Markdown. `brew install glow`, or set \"renderer\" in the config to silence this.") + "\n",
+      );
+    }
+  }
   if (pick !== "none") {
     const args = pick === "glow" ? ["-"] : ["-l", "md", "--style=plain"];
     const r = spawnSync(pick, args, { input: md, stdio: ["pipe", "inherit", "inherit"] });
@@ -305,6 +457,12 @@ const HELP = `barebones-agent — one turn of work per invocation.
   --approve | --always-approve    allow the pending shell command
   --decline [reason]              refuse it; with no reason, hands back to you
   --compact                       compact the history now
+  --timeout <s>                   per-request limit for the model API
+  --bash-timeout <s>              limit for a single run_bash command
+  --quiet                         no progress output
+  --usage                         report this session's token spend and exit
+
+  Write !act or !plan on its own line in the transcript to switch mode.
   --model <id>  --editor <cmd>  --compact-at <n>  --verbose  --help
 
 Config: ${CONFIG_PATH}`;
@@ -325,6 +483,10 @@ async function main(): Promise<void> {
       "compact-at": { type: "string" },
       model: { type: "string" },
       editor: { type: "string" },
+      timeout: { type: "string" },
+      "bash-timeout": { type: "string" },
+      quiet: { type: "boolean", short: "q" },
+      usage: { type: "boolean" },
       verbose: { type: "boolean", short: "v" },
       help: { type: "boolean", short: "h" },
     },
@@ -337,6 +499,8 @@ async function main(): Promise<void> {
 
   const cfg = loadConfig();
   if (values["compact-at"]) cfg.compactAt = Number(values["compact-at"]);
+  if (values.timeout) cfg.requestTimeoutMs = Number(values.timeout) * 1000;
+  if (values["bash-timeout"]) cfg.bashTimeoutMs = Number(values["bash-timeout"]) * 1000;
 
   const mode: Mode = values.plan ? "plan" : values.act ? "act" : "act";
   const session = values.session
@@ -348,6 +512,13 @@ async function main(): Promise<void> {
   setContext({ cfg, session });
 
   const resume = `${invocation()} -s ${session.id}`;
+
+  if (values.usage) {
+    // Read-only: report what the session has spent without calling the model.
+    process.stdout.write(`${formatUsage("session", session.usage)}\n`);
+    process.stdout.write(`         across ${session.usage.turns} turn${session.usage.turns === 1 ? "" : "s"}\n`);
+    return;
+  }
   let prompt = "";
 
   // --- resolve where this turn's prompt comes from -------------------------
@@ -403,6 +574,10 @@ async function main(): Promise<void> {
     saveSession(cfg, session);
     die(`No prompt found. Write one under the last "## You" heading:\n\n↻  ${resume} -e`);
   }
+  // A directive written into the prompt wins over the flags: it is the newer intent.
+  const directive = extractMode(prompt);
+  prompt = directive.prompt;
+  if (directive.mode) session.mode = directive.mode;
   session.pendingQuestion = null;
 
   // --- run ----------------------------------------------------------------
@@ -420,15 +595,15 @@ async function main(): Promise<void> {
       // The default agentic loop cap is 5 rounds, which a real coding task blows
       // through immediately. (withToolCalls() is a different knob — parallelism.)
       maxToolCalls: MAX_TOOL_CALLS,
+      requestTimeout: cfg.requestTimeoutMs,
     })
     .withInstructions(SYSTEM_PROMPT);
 
   if (values.compact || (cfg.compactAt > 0 && session.lastInputTokens > cfg.compactAt)) {
     const before = session.messages.length;
-    session.messages = await compactHistory(session.messages, {
-      llm,
-      keepRecentTurns: KEEP_RECENT_TURNS,
-    });
+    const compacted = await compactHistory(session.messages, { llm, keepRecentTurns: KEEP_RECENT_TURNS });
+    session.messages = compacted.messages;
+    session.usage = addUsage(session.usage, priceUsage(compacted.usage, cfg.pricing[compacted.model]));
     // Compaction rewrites the prefix, so the next request cannot hit the cache.
     session.announcedMode = null;
     if (values.verbose) process.stderr.write(`compacted ${before} → ${session.messages.length} messages\n`);
@@ -446,23 +621,62 @@ async function main(): Promise<void> {
     // into the Anthropic request body, which is how we reach top-level auto-caching.
     .withParams({ cache_control: { type: "ephemeral", ttl: "1h" } });
 
+  // Progress. By the time onToolCallStart fires, the assistant message that requested
+  // the call — including any text it wrote first — is already in chat.history, so the
+  // model's own running commentary can be surfaced rather than just tool names.
+  const progress = new Progress(!values.quiet);
+  let narrated = 0;
+  let outstanding = 0;
+
+  const narrate = (): void => {
+    const history = chat.history;
+    for (let i = narrated; i < history.length; i++) {
+      const m = history[i];
+      if (m?.role !== "assistant") continue;
+      const text = String(m.content ?? "").trim();
+      if (text) progress.line(dim(text.split("\n").slice(0, 4).join("\n")));
+    }
+    narrated = history.length;
+  };
+
+  chat
+    .onNewMessage(() => progress.step("thinking"))
+    .onToolCallStart((call) => {
+      narrate();
+      outstanding++;
+      const { name, args } = describeCall(call);
+      progress.line(`  ${name}${args ? ` ${dim(args)}` : ""}`);
+      progress.step(name);
+    })
+    .onToolCallEnd(() => {
+      if (--outstanding === 0) progress.step("thinking");
+    });
+
   let res;
   try {
+    progress.step("thinking");
     res = await chat.ask(prompt);
   } catch (err) {
+    progress.stop();
     // Persist whatever the turn accomplished; otherwise a failure mid-loop throws
     // away every tool call it already made.
     session.messages = slim(chat.history);
     saveSession(cfg, session);
-    appendTranscript(cfg, session, `\n## Agent\n\n_Turn failed: ${err instanceof Error ? err.message : String(err)}_\n\n${YOU}\n\n${PROMPT_STUB}\n`);
-    die(`${err instanceof Error ? err.message : String(err)}\n\n↻  ${resume} -e`);
+    const why = explainFailure(err, cfg);
+    appendTranscript(cfg, session, `\n## Agent\n\n_Turn failed: ${why}_\n\n${YOU}\n\n${PROMPT_STUB}\n`);
+    die(`${why}\n\nWork so far is saved. Continue with:\n↻  ${resume} -e`);
   }
+  progress.stop();
   // NodeLLM discards Anthropic's stop_reason, so a safety refusal arrives as nothing at
   // all. Say so, rather than writing a blank section the user has to puzzle over.
+  const raw = res.content.trim();
+  const readyToAct = raw.includes(READY_MARKER);
   const answer =
-    res.content.trim() ||
+    raw.replace(READY_MARKER, "").trim() ||
     "_The model returned no content. This usually means the request was refused; the reason is not recoverable here. Try rephrasing._";
 
+  const spent = turnUsage(chat.history, cfg.pricing[session.model]);
+  session.usage = addUsage(session.usage, spent);
   session.messages = slim(chat.history);
   session.lastInputTokens = res.input_tokens ?? 0;
 
@@ -477,16 +691,15 @@ async function main(): Promise<void> {
     appendTranscript(cfg, session, shown);
   } else {
     shown = answer;
-    appendTranscript(cfg, session, `\n## Agent\n\n${answer}\n\n${YOU}\n\n${PROMPT_STUB}\n`);
+    const stub = readyToAct && session.mode === "plan" ? ACT_STUB : PROMPT_STUB;
+    appendTranscript(cfg, session, `\n## Agent\n\n${answer}\n\n${YOU}\n\n${stub}\n`);
   }
   saveSession(cfg, session);
 
   render(shown, cfg);
 
   if (values.verbose) {
-    process.stderr.write(
-      `\ntokens: in ${res.input_tokens} (cached ${res.cached_tokens ?? 0}) out ${res.output_tokens}\n`,
-    );
+    process.stderr.write(`\n${formatUsage("turn", spent)}\n${formatUsage("session", session.usage)}\n`);
   }
   const next = session.pendingBash ? " --approve" : " -e";
   process.stdout.write(`\n↻  ${resume}${next}\n`);
