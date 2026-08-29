@@ -51,6 +51,7 @@ Every run prints the exact command to continue:
 | `--quiet` | No progress output |
 | `--usage` | Report the session's token spend and exit |
 | `-l` / `--sessions` | List the sessions saved in this directory, newest first, each with the command to resume it |
+| `Ctrl-C` | Stop the turn and save it; twice cuts a request in flight |
 | `--model <id>` `--editor <cmd>` `--compact-at <n>` `--verbose` `--help` | |
 
 ### Finding an old session
@@ -73,6 +74,41 @@ as the label and the resume command spelled out:
 
 A session halted mid-turn is flagged, and its command is the one that unblocks it
 (`--approve` for a pending shell command) rather than `-e`.
+
+### Interrupting a turn
+
+`Ctrl-C` stops a turn **without losing what it already did**. Every completed tool result
+is kept, so you can ask about them:
+
+```
+  read_file src/agent.ts
+  search_code pendingBash
+^C
+⏸  stopping at the next tool call — ^C again to cut the request now
+
+## ⏸ Interrupted
+
+_Stopped after 7 tool calls._
+
+- `list_tree src`
+- `read_file src/agent.ts`
+- `search_code pendingBash`
+
+↻  bba -s 7f3a2c91 -e
+```
+
+Then `bba -s <id> -e`, type *"what were you doing? explain these tool calls"*, and it
+answers from the results it already has — and **stops there**. It never resumes the
+interrupted task on its own; that takes another prompt from you.
+
+The list matters because the progress display is stderr-only and erases itself, so the
+transcript is the only durable record of the calls you stopped to ask about.
+
+**Two presses.** `ask()` is not streaming, so while the model is composing a reply there
+is no safe point to stop at. The first press halts at the next tool call — instant while
+tools are running, otherwise it waits for the reply in flight. The second press cuts that
+request; only the uncompleted reply is lost, and the transcript says so, since its tokens
+are billed but cannot be counted.
 
 ### Progress
 
@@ -307,5 +343,14 @@ saved to the session first, so nothing already done is lost.
   `usage` NodeLLM attaches to history instead.
 - NodeLLM's pricing registry has no `claude-opus-5` entry, so costs are computed from
   the local `pricing` table rather than from its `usage.cost`.
+- Its `AskOptions.signal` never reaches the wire on Anthropic: the provider spreads
+  unrecognised keys into the request body (the same channel `cache_control` rides), so a
+  signal would be sent as `"signal":{}` and rejected. Cutting a request therefore wraps
+  `globalThis.fetch` for the duration of the model call — see `withCuttableFetch`.
+- Its tool loop stops at a `halt()` *after* running the rest of the round, discarding the
+  results it did not reach and leaving those `tool_use` blocks unanswered. Anthropic
+  rejects a history in that shape, so `repairDangling` synthesises the missing results on
+  every load and save. This also fixes two failures that predate interrupts: a turn that
+  trips `maxToolCalls`, and `ask_user`/`run_bash` halting in a batched round.
 - It also discards Anthropic's `stop_reason`, so a refusal arrives as an empty response.
   The agent says so rather than writing a blank section.

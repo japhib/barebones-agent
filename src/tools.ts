@@ -23,12 +23,20 @@ import {
   saveConfig,
 } from "./context.js";
 
+/** What a tool returns when the user has pressed Ctrl-C. Ending the loop through halt()
+ *  rather than a throw means the tool call is still answered, so the history stays valid
+ *  and every result gathered before the interrupt survives into the next turn. */
+export const INTERRUPT_HALT = "The user interrupted this turn.";
+
 /** Tool failures are returned to the model as text rather than thrown, so it can
  *  read the message and correct itself instead of the run dying. */
 abstract class SafeTool<T> extends Tool<T> {
   protected abstract run(args: T): Promise<unknown>;
 
   override async execute(args: T): Promise<unknown> {
+    // Checked before the work, never after: a tool that already ran keeps its result,
+    // and the loop stops at the next call instead.
+    if (ctx().interrupt.requested) return this.halt(INTERRUPT_HALT);
     try {
       return await this.run(args);
     } catch (err) {
@@ -262,6 +270,8 @@ const APPROVAL_KEYS: Record<string, Approval> = { y: "yes", a: "always", n: "no"
  *
  * Raw mode is what makes a single key enough — but it also stops the kernel turning
  * Ctrl-C into SIGINT, so \x03 has to be handled by hand or the prompt becomes a trap.
+ * It records an interrupt rather than exiting, so the turn's work is saved on the way
+ * out like any other Ctrl-C.
  */
 function readKey(valid: string[]): Promise<string> {
   return new Promise((resolve) => {
@@ -282,9 +292,9 @@ function readKey(valid: string[]): Promise<string> {
     const onData = (buf: Buffer): void => {
       for (const ch of buf.toString().toLowerCase()) {
         if (ch === "\u0003") {
-          done("");
+          ctx().interrupt.requested = true;
           process.stderr.write("\n");
-          process.exit(130);
+          return done("");
         }
         if (valid.includes(ch)) return done(ch);
       }
@@ -309,7 +319,16 @@ async function askApproval(command: string, reason: string): Promise<Approval | 
       `  [\x1b[1my\x1b[0m] run once   [\x1b[1ma\x1b[0m] always allow this command   [\x1b[1mn\x1b[0m] decline\n`,
   );
   const answer = APPROVAL_KEYS[await readKey(Object.keys(APPROVAL_KEYS))] ?? "no";
-  process.stderr.write(`  \x1b[2m→ ${answer === "no" ? "declined" : answer === "always" ? "always allowed" : "approved"}\x1b[0m\n`);
+  // Ctrl-C here is an interrupt, not a refusal — saying "declined" would tell both the
+  // user and the model something they never chose.
+  const said = ctx().interrupt.requested
+    ? "interrupted"
+    : answer === "no"
+      ? "declined"
+      : answer === "always"
+        ? "always allowed"
+        : "approved";
+  process.stderr.write(`  \x1b[2m→ ${said}\x1b[0m\n`);
   progress.step("run_bash");
   return answer;
 }
@@ -334,6 +353,7 @@ class RunBashTool extends SafeTool<z.infer<typeof runBashArgs>> {
       session.approvedOnce.splice(once, 1); // a one-shot approval is spent
     } else {
       const answer = await askApproval(command, reason);
+      if (ctx().interrupt.requested) return this.halt(INTERRUPT_HALT);
       if (answer === null) {
         // Nothing to prompt on, so fall back to asking through the transcript.
         session.pendingBash = { command, reason };

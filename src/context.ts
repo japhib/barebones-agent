@@ -115,13 +115,30 @@ export interface Session {
   pendingBash: PendingBash | null;
   /** Set when the user declines interactively; the turn ends and they get the editor. */
   declinedCommand: string | null;
+  /** Tool calls made during a turn the user interrupted, as display labels. Reported in
+   *  the transcript on the way out and cleared once the model has been told. */
+  interrupted: string[] | null;
   approvedOnce: string[];
+}
+
+/**
+ * Ctrl-C state for the current turn.
+ *
+ * Two stages, because `ask()` is not streaming: while tools are running there is a safe
+ * boundary every few seconds, but during a single model request there is none for as
+ * long as the model takes to think. The first press waits for that boundary and loses
+ * nothing; the second cuts the request itself.
+ */
+export interface Interrupt {
+  requested: boolean;
+  hard: boolean;
 }
 
 export interface Ctx {
   cfg: Config;
   session: Session;
   progress: Progress;
+  interrupt: Interrupt;
 }
 
 export function saveConfig(cfg: Config): void {

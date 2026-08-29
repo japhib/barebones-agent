@@ -14,9 +14,9 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { parseArgs } from "node:util";
 
-import { compactHistory } from "./compact.js";
+import { compactHistory, repairDangling } from "./compact.js";
 import { Progress, dim } from "./progress.js";
-import { TOOLS } from "./tools.js";
+import { INTERRUPT_HALT, TOOLS } from "./tools.js";
 import {
   APP_DIR,
   CONFIG_PATH,
@@ -33,6 +33,7 @@ import {
   type PendingBash,
   type PendingQuestion,
   type Renderer,
+  type Interrupt,
   type ModelPrice,
   type Session,
   type Usage,
@@ -51,6 +52,7 @@ const GUI_EDITORS = new Set(["code", "code-insiders", "codium", "subl", "zed", "
 const YOU = "## You";
 const PROMPT_STUB = "<!-- type your next prompt below, save, and re-run -->";
 const ANSWER_STUB = "<!-- tick a box above, or just type an answer below -->";
+const INTERRUPT_STUB = "<!-- ask what it was doing, or tell it where to go next -->";
 const ACT_STUB =
   "<!-- The agent is ready to build this. Write !act on its own line to switch to act\n     mode and proceed, or reply with changes you want first. -->";
 /** The model emits this to say a plan is finished and it wants the go-ahead. */
@@ -146,6 +148,7 @@ function newSession(cfg: Config, model: string, mode: Mode): Session {
     pendingQuestion: null,
     pendingBash: null,
     declinedCommand: null,
+    interrupted: null,
     approvedOnce: [],
   };
 }
@@ -156,6 +159,10 @@ function loadSession(cfg: Config, id: string): Session {
   const s = JSON.parse(fs.readFileSync(p, "utf8")) as Session;
   s.usage ??= zeroUsage(); // sessions created before usage tracking
   s.declinedCommand ??= null;
+  s.interrupted ??= null;
+  // Repaired on the way in as well as on the way out, so a session already poisoned by
+  // an older build — or by a crash between the two — still resumes.
+  s.messages = repairDangling(s.messages ?? []);
   return s;
 }
 
@@ -227,7 +234,9 @@ function listSessions(cfg: Config): void {
       ? "  \u26a0 awaiting approval"
       : s.pendingQuestion
         ? "  ? awaiting an answer"
-        : "";
+        : s.interrupted
+          ? "  \u23f8 interrupted"
+          : "";
     const next = s.pendingBash ? "--approve" : "-e";
     const cost = s.usage.priced ? money(s.usage.costUsd) : `${money(s.usage.costUsd)}+`;
     const meta = `${ago(mtimeMs)} \u00b7 ${s.mode} \u00b7 ${s.model} \u00b7 ${s.usage.turns} turn${s.usage.turns === 1 ? "" : "s"} \u00b7 ${cost}`;
@@ -242,9 +251,12 @@ function listSessions(cfg: Config): void {
 /** `usage` and `reasoning` vary every turn. Re-sending them would perturb the
  *  serialized request and cost us the prompt cache, so they never get persisted.
  *  System messages are dropped too: withInstructions() re-applies the prompt on every
- *  run, so persisting it would stack one more copy per turn. */
+ *  run, so persisting it would stack one more copy per turn.
+ *
+ *  Every path that persists a turn goes through here, so this is also where a history
+ *  left dangling by an interrupt, a timeout or a blown maxToolCalls is repaired. */
 function slim(messages: readonly Message[]): Message[] {
-  return messages
+  return repairDangling(messages)
     .filter((m) => m.role !== "system" && m.role !== "developer")
     .map((m) => {
       const { usage: _u, reasoning: _r, ...rest } = m;
@@ -331,6 +343,40 @@ function renderApproval(b: PendingBash, s: Session): string {
     `${run} --decline          refuse, and tell it what to do instead`,
     "```\n",
   ].join("\n");
+}
+
+/**
+ * What the interrupted turn actually did.
+ *
+ * Progress narration goes to stderr and erases itself on a TTY, so by the time the user
+ * opens the transcript it is gone. This list is the only durable record of the calls
+ * they stopped to ask about.
+ */
+function renderInterrupted(calls: string[], forced: boolean): string {
+  const what = calls.length
+    ? `_Stopped after ${calls.length} tool call${calls.length === 1 ? "" : "s"}._\n`
+    : `_Stopped before it made any tool calls._\n`;
+  const lines = [`\n## \u23f8 Interrupted\n`, what];
+  if (calls.length) lines.push(`${calls.map((c) => `- \`${c}\``).join("\n")}\n`);
+  if (forced) {
+    lines.push(
+      `_The reply in flight was discarded, so its tokens are billed but not counted._\n`,
+    );
+  }
+  lines.push(`\n${YOU}\n\n${INTERRUPT_STUB}\n`);
+  return lines.join("\n");
+}
+
+/** Delivered as a trailing user message, the way modeMessage announces a mode change.
+ *  It lands after the cached prefix, so unlike editing SYSTEM_PROMPT it costs no hit. */
+function interruptedMessage(n: number): string {
+  return (
+    `[interrupted] The user pressed Ctrl-C and stopped you after ${n} tool call${n === 1 ? "" : "s"}. ` +
+    `The tool results above are real; any marked as never run did not run. Their next ` +
+    `message responds to that interruption and is most likely a question about what you ` +
+    `were doing. Answer it from what you already found, then stop. Do not resume the ` +
+    `interrupted task unless they ask you to.`
+  );
 }
 
 // ---------------------------------------------------------------- tools
@@ -531,6 +577,9 @@ function readRange(a: Record<string, unknown>): string {
 /** A bare "Request timeout after 30000ms" tells the user nothing about what stalled. */
 function explainFailure(err: unknown, cfg: Config): string {
   const msg = err instanceof Error ? err.message : String(err);
+  // fetchWithTimeout rethrows a raw AbortError when something other than its own timeout
+  // controller fired — which, here, is always the user cutting the request.
+  if (err instanceof Error && err.name === "AbortError") return "The request was cut short.";
   const timeout = /^Request timeout after (\d+)ms$/.exec(msg);
   if (timeout) {
     const secs = Math.round(Number(timeout[1]) / 1000);
@@ -572,6 +621,27 @@ function render(md: string, cfg: Config): void {
   process.stdout.write(`${md}\n`);
 }
 
+/**
+ * Run `fn` with a fetch that a second Ctrl-C can cut.
+ *
+ * NodeLLM accepts an AbortSignal on ask(), but its Anthropic provider never forwards one
+ * to fetch — it spreads unrecognised keys into the JSON body instead (the same channel
+ * withParams({cache_control}) rides), so passing a signal would put "signal":{} in the
+ * request and be rejected. Wrapping the global is the only seam left. It is scoped to
+ * the model call and restored straight after; fetchWithTimeout always sets its own
+ * timeout signal, so ours is merged in rather than replacing it.
+ */
+async function withCuttableFetch<T>(signal: AbortSignal, fn: () => Promise<T>): Promise<T> {
+  const original = globalThis.fetch;
+  globalThis.fetch = (input, init) =>
+    original(input, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, signal]) : signal });
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = original;
+  }
+}
+
 // ---------------------------------------------------------------- main
 
 const HELP = `barebones-agent — one turn of work per invocation.
@@ -594,6 +664,7 @@ const HELP = `barebones-agent — one turn of work per invocation.
   --quiet                         no progress output
   --usage                         report this session's token spend and exit
 
+  Ctrl-C stops the turn and saves it; press it twice to cut a request in flight.
   Write !act or !plan on its own line in the transcript to switch mode.
   --model <id>  --editor <cmd>  --compact-at <n>  --verbose  --help
 
@@ -649,7 +720,8 @@ async function main(): Promise<void> {
   if (values.plan) session.mode = "plan";
   if (values.act) session.mode = "act";
   const progress = new Progress(!values.quiet);
-  setContext({ cfg, session, progress });
+  const interrupt: Interrupt = { requested: false, hard: false };
+  setContext({ cfg, session, progress, interrupt });
 
   const resume = `${invocation()} -s ${session.id}`;
 
@@ -758,6 +830,10 @@ async function main(): Promise<void> {
     chat.addMessage({ role: "user", content: modeMessage(session.mode) });
     session.announcedMode = session.mode;
   }
+  if (session.interrupted) {
+    chat.addMessage({ role: "user", content: interruptedMessage(session.interrupted.length) });
+    session.interrupted = null;
+  }
 
   chat
     .withTools(TOOLS)
@@ -770,6 +846,8 @@ async function main(): Promise<void> {
   // model's own running commentary can be surfaced rather than just tool names.
   let narrated = 0;
   let outstanding = 0;
+  /** Labels for what this turn did, kept for the transcript if it gets interrupted. */
+  const calls: string[] = [];
 
   const narrate = (): void => {
     const history = chat.history;
@@ -788,6 +866,9 @@ async function main(): Promise<void> {
       narrate();
       outstanding++;
       const { name, args } = describeCall(call);
+      // Once the interrupt has fired, the next call is the one that halts — that is the
+      // stop itself, not work the agent did, so it stays off the list.
+      if (!interrupt.requested) calls.push(args ? `${name} ${args}` : name);
       progress.line(`  ${name}${args ? ` ${dim(args)}` : ""}`);
       progress.step(name);
     })
@@ -795,21 +876,74 @@ async function main(): Promise<void> {
       if (--outstanding === 0) progress.step("thinking");
     });
 
+  // Written before the model is called so that even a kill -9 leaves a session that
+  // `-l` can see and `-s` can resume, rather than an orphaned transcript.
+  saveSession(cfg, session);
+
+  /** Everything an interrupted turn needs on the way out. Shared by the two ways a turn
+   *  can be cut short: a tool halting on the flag, and a request cut mid-flight. */
+  const finishInterrupted = (forced: boolean): void => {
+    progress.stop();
+    session.usage = addUsage(session.usage, turnUsage(chat.history, cfg.pricing[session.model]));
+    session.messages = slim(chat.history);
+    session.interrupted = calls;
+    saveSession(cfg, session);
+    const shown = renderInterrupted(calls, forced);
+    appendTranscript(cfg, session, shown);
+    render(shown, cfg);
+    process.stdout.write(`\n${session.mode} mode · continue with:\n↻  ${resume} -e\n`);
+  };
+
+  const cut = new AbortController();
+  const onSigint = (): void => {
+    if (!interrupt.requested) {
+      interrupt.requested = true;
+      progress.line(dim("⏸  stopping at the next tool call — ^C again to cut the request now"));
+    } else if (!interrupt.hard) {
+      interrupt.hard = true;
+      cut.abort();
+      progress.line(dim("✂  cut mid-request"));
+    } else {
+      progress.stop(); // third press: they want out now, and the turn is already saved
+      process.exit(130);
+    }
+  };
+  // Installed only around the model call. A Ctrl-C in the editor or the pager either
+  // side of it should keep its default behaviour.
+  process.on("SIGINT", onSigint);
+
   let res;
   try {
     progress.step("thinking");
-    res = await chat.ask(prompt);
+    res = await withCuttableFetch(cut.signal, () => chat.ask(prompt));
   } catch (err) {
+    process.off("SIGINT", onSigint);
     progress.stop();
+    // A cut request is the user's decision, not a failure: what the turn gathered is
+    // kept and reported exactly as a graceful interrupt is.
+    if (interrupt.requested) {
+      finishInterrupted(true);
+      return;
+    }
     // Persist whatever the turn accomplished; otherwise a failure mid-loop throws
     // away every tool call it already made.
+    session.usage = addUsage(session.usage, turnUsage(chat.history, cfg.pricing[session.model]));
     session.messages = slim(chat.history);
     saveSession(cfg, session);
     const why = explainFailure(err, cfg);
     appendTranscript(cfg, session, `\n## Agent\n\n_Turn failed: ${why}_\n\n${YOU}\n\n${PROMPT_STUB}\n`);
     die(`${why}\n\nWork so far is saved. Continue with:\n↻  ${resume} -e`);
   }
+  process.off("SIGINT", onSigint);
   progress.stop();
+
+  // A halt on the interrupt flag returns normally rather than throwing. If the flag is
+  // set but the model still produced a real answer, the turn beat the Ctrl-C — show that
+  // answer rather than discarding work already paid for.
+  if (interrupt.requested && res.content.trim() === INTERRUPT_HALT) {
+    finishInterrupted(false);
+    return;
+  }
   // NodeLLM discards Anthropic's stop_reason, so a safety refusal arrives as nothing at
   // all. Say so, rather than writing a blank section the user has to puzzle over.
   const raw = res.content.trim();
