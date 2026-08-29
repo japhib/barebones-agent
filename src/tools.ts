@@ -114,6 +114,19 @@ class ListTreeTool extends SafeTool<z.infer<typeof listTreeArgs>> {
   }
 }
 
+/** Header for a search result: the regex as given, and how much matched.
+ *  ripgrep prints "file:line:match", so the file is everything before the first colon. */
+function searchSummary(pattern: string, out: string): string {
+  const lines = out.trim().split("\n");
+  const files = new Set<string>();
+  for (const l of lines) {
+    const colon = l.indexOf(":");
+    if (colon > 0) files.add(l.slice(0, colon));
+  }
+  const matches = `${lines.length} match${lines.length === 1 ? "" : "es"}`;
+  return `/${pattern}/ — ${matches} in ${files.size} file${files.size === 1 ? "" : "s"}`;
+}
+
 const searchArgs = z.object({
   pattern: z.string().describe("Regular expression to search for"),
   glob: z.string().optional().describe("Only search files matching this glob, e.g. '*.ts'"),
@@ -121,7 +134,8 @@ const searchArgs = z.object({
 });
 class SearchCodeTool extends SafeTool<z.infer<typeof searchArgs>> {
   name = "search_code";
-  description = "Search the codebase with ripgrep. Returns file:line:match. Respects .gitignore.";
+  description =
+    "Search the codebase with ripgrep. Returns a header naming the regex with its match and file counts, then file:line:match. Respects .gitignore.";
   schema = searchArgs;
   protected async run({ pattern, glob, path: p = "." }: z.infer<typeof searchArgs>) {
     const args = ["-n", "--no-heading", "--color=never", "--max-columns", "300"];
@@ -129,11 +143,12 @@ class SearchCodeTool extends SafeTool<z.infer<typeof searchArgs>> {
     args.push("--", pattern, resolveSafe(p));
     try {
       const out = execFileSync("rg", args, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
-      return out.trim() ? cap(out) : "No matches.";
+      // Summarise before cap(): a truncated body must still report the true totals.
+      return out.trim() ? `${searchSummary(pattern, out)}\n${cap(out)}` : `No matches for /${pattern}/.`;
     } catch (err) {
       const e = err as { status?: number; code?: string; stderr?: Buffer };
       // ripgrep exits 1 for "no matches found", which is a result, not a failure.
-      if (e.status === 1) return "No matches.";
+      if (e.status === 1) return `No matches for /${pattern}/.`;
       if (e.code === "ENOENT") throw new Error("ripgrep not found — install it with `brew install ripgrep`.");
       throw new Error(e.stderr?.toString().trim() || String(err));
     }
