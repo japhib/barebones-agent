@@ -159,6 +159,86 @@ function loadSession(cfg: Config, id: string): Session {
   return s;
 }
 
+/** The opening prompt, as a one-line label for a session. Read from the transcript
+ *  rather than the history, which starts with the mode announcement. */
+function sessionTitle(cfg: Config, s: Session): string {
+  let text = "";
+  const p = mdPath(cfg, s.id);
+  if (fs.existsSync(p)) {
+    const md = fs.readFileSync(p, "utf8");
+    const i = md.indexOf(`\n${YOU}\n`);
+    if (i !== -1) {
+      text = md.slice(i + YOU.length + 2).replace(/<!--[\s\S]*?-->/g, "");
+      const end = text.indexOf("\n## ");
+      if (end !== -1) text = text.slice(0, end);
+    }
+  }
+  if (!text.trim()) {
+    const first = s.messages?.find(
+      (m) => m.role === "user" && !String(m.content ?? "").startsWith("[mode:"),
+    );
+    text = String(first?.content ?? "");
+  }
+  const line = text.split("\n").map((l) => l.trim()).find(Boolean) ?? "(no prompt yet)";
+  return line.length > 72 ? `${line.slice(0, 71)}\u2026` : line;
+}
+
+function ago(ms: number): string {
+  const secs = Math.max(0, (Date.now() - ms) / 1000);
+  if (secs < 60) return `${Math.round(secs)}s ago`;
+  if (secs < 3_600) return `${Math.round(secs / 60)}m ago`;
+  if (secs < 86_400) return `${Math.round(secs / 3_600)}h ago`;
+  return `${Math.round(secs / 86_400)}d ago`;
+}
+
+/**
+ * Every session saved under this directory, newest first, each with the command that
+ * resumes it. Sessions live beside the project (cfg.sessionDir), so this is inherently
+ * scoped to the current directory — there is no global list to filter.
+ */
+function listSessions(cfg: Config): void {
+  const dir = sessionDir(cfg);
+  const rel = path.relative(CWD, dir) || dir;
+  const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith(".json")) : [];
+
+  const found: { s: Session; mtimeMs: number }[] = [];
+  for (const file of files) {
+    const p = path.join(dir, file);
+    try {
+      const s = JSON.parse(fs.readFileSync(p, "utf8")) as Session;
+      s.id ||= path.basename(file, ".json");
+      s.usage ??= zeroUsage();
+      found.push({ s, mtimeMs: fs.statSync(p).mtimeMs });
+    } catch {
+      process.stderr.write(dim(`skipped unreadable session file ${rel}/${file}`) + "\n");
+    }
+  }
+
+  if (!found.length) {
+    process.stdout.write(`No sessions under ${rel}/.\n`);
+    return;
+  }
+  found.sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+  process.stdout.write(`${found.length} session${found.length === 1 ? "" : "s"} under ${rel}/\n`);
+  for (const { s, mtimeMs } of found) {
+    // A halted session resumes through the flag that unblocks it, not through -e.
+    const waiting = s.pendingBash
+      ? "  \u26a0 awaiting approval"
+      : s.pendingQuestion
+        ? "  ? awaiting an answer"
+        : "";
+    const next = s.pendingBash ? "--approve" : "-e";
+    const cost = s.usage.priced ? money(s.usage.costUsd) : `${money(s.usage.costUsd)}+`;
+    const meta = `${ago(mtimeMs)} \u00b7 ${s.mode} \u00b7 ${s.model} \u00b7 ${s.usage.turns} turn${s.usage.turns === 1 ? "" : "s"} \u00b7 ${cost}`;
+    process.stdout.write(
+      `\n  ${s.id}  ${dim(meta)}${waiting}\n` +
+        `  ${dim(sessionTitle(cfg, s))}\n` +
+        `  \u21bb  ${invocation()} -s ${s.id} ${next}\n`,
+    );
+  }
+}
+
 /** `usage` and `reasoning` vary every turn. Re-sending them would perturb the
  *  serialized request and cost us the prompt cache, so they never get persisted.
  *  System messages are dropped too: withInstructions() re-applies the prompt on every
@@ -503,6 +583,7 @@ const HELP = `barebones-agent — one turn of work per invocation.
   bba -s <id> -f prompt.md        take the prompt from a file
   bba -s <id> -e                  edit the transcript, then run what you wrote
   bba -s <id>                     run whatever is under the last "## You"
+  bba -l | --sessions             list this directory's sessions and how to resume each
 
   --plan | --act                  switch mode (persists in the session)
   --approve | --always-approve    allow the pending shell command
@@ -538,6 +619,7 @@ async function main(): Promise<void> {
       "bash-timeout": { type: "string" },
       quiet: { type: "boolean", short: "q" },
       usage: { type: "boolean" },
+      sessions: { type: "boolean", short: "l" },
       verbose: { type: "boolean", short: "v" },
       help: { type: "boolean", short: "h" },
     },
@@ -552,6 +634,12 @@ async function main(): Promise<void> {
   if (values["compact-at"]) cfg.compactAt = Number(values["compact-at"]);
   if (values.timeout) cfg.requestTimeoutMs = Number(values.timeout) * 1000;
   if (values["bash-timeout"]) cfg.bashTimeoutMs = Number(values["bash-timeout"]) * 1000;
+
+  if (values.sessions) {
+    // Read-only, and never needs an id: this is how you find one.
+    listSessions(cfg);
+    return;
+  }
 
   const mode: Mode = values.plan ? "plan" : values.act ? "act" : "act";
   const session = values.session

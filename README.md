@@ -30,6 +30,7 @@ bba -s <id> "now add a --version flag"  # continue it
 bba -s <id> -e                          # edit the transcript, then run what you wrote
 bba -s <id>                             # run whatever is under the last "## You"
 bba -s <id> -f prompt.md                # take the prompt from a file
+bba -l                                  # list this directory's sessions
 ```
 
 Every run prints the exact command to continue:
@@ -49,7 +50,29 @@ Every run prints the exact command to continue:
 | `--bash-timeout <s>` | Limit for a single `run_bash` command (default 120s) |
 | `--quiet` | No progress output |
 | `--usage` | Report the session's token spend and exit |
+| `-l` / `--sessions` | List the sessions saved in this directory, newest first, each with the command to resume it |
 | `--model <id>` `--editor <cmd>` `--compact-at <n>` `--verbose` `--help` | |
+
+### Finding an old session
+
+Sessions live in `.agent/` beside the project, so `bba -l` lists exactly the ones
+belonging to the directory you are standing in — newest first, with the opening prompt
+as the label and the resume command spelled out:
+
+```
+2 sessions under .agent/
+
+  7f3a2c91  4m ago · act · claude-opus-5 · 3 turns · $0.4231
+  add a --version flag that prints the package version and exits
+  ↻  bba -s 7f3a2c91 -e
+
+  aa11bb22  2d ago · plan · claude-sonnet-5 · 1 turn · $0.0120  ⚠ awaiting approval
+  run the test suite and fix whatever fails
+  ↻  bba -s aa11bb22 --approve
+```
+
+A session halted mid-turn is flagged, and its command is the one that unblocks it
+(`--approve` for a pending shell command) rather than `-e`.
 
 ### Progress
 
