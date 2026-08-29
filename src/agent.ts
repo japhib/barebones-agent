@@ -497,6 +497,8 @@ function render(md: string, cfg: Config): void {
 const HELP = `barebones-agent — one turn of work per invocation.
 
   bba "prompt"                    start a new session
+  bba -e                          start one, writing the prompt in your editor
+  bba -f prompt.md                start one from a prompt file
   bba -s <id> "prompt"            continue a session
   bba -s <id> -f prompt.md        take the prompt from a file
   bba -s <id> -e                  edit the transcript, then run what you wrote
