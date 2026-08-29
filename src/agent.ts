@@ -24,6 +24,7 @@ import {
   DEFAULT_BASH_TIMEOUT_MS,
   DEFAULT_PRICING,
   DEFAULT_REQUEST_TIMEOUT_MS,
+  MAX_READ_LINES,
   saveConfig,
   setContext,
   zeroUsage,
@@ -427,10 +428,24 @@ function describeCall(call: unknown): { name: string; args: string } {
   try {
     const a = JSON.parse(c.function?.arguments ?? "{}") as Record<string, unknown>;
     const key = a.path ?? a.pattern ?? a.query ?? a.command ?? a.question;
-    return { name, args: key === undefined ? "" : String(key).slice(0, 80) };
+    if (key === undefined) return { name, args: "" };
+    const args = String(key).slice(0, 80);
+    return { name, args: name === "read_file" ? args + readRange(a) : args };
   } catch {
     return { name, args: "" };
   }
+}
+
+/** " lines 40-120" for a read_file call, mirroring the slice the tool will take.
+ *  A read with neither bound is the whole file, and saying "lines 1-2000" about a
+ *  40-line file would be a lie, so that case gets no suffix. */
+function readRange(a: Record<string, unknown>): string {
+  const offset = typeof a.offset === "number" ? a.offset : undefined;
+  const limit = typeof a.limit === "number" ? a.limit : undefined;
+  if (offset === undefined && limit === undefined) return "";
+  const start = offset ?? 1;
+  if (limit === undefined) return ` lines ${start}-`;
+  return ` lines ${start}-${start + Math.min(limit, MAX_READ_LINES) - 1}`;
 }
 
 /** A bare "Request timeout after 30000ms" tells the user nothing about what stalled. */
