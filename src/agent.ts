@@ -898,7 +898,7 @@ async function main(): Promise<void> {
   const onSigint = (): void => {
     if (!interrupt.requested) {
       interrupt.requested = true;
-      progress.line(dim("⏸  stopping at the next tool call — ^C again to cut the request now"));
+      progress.line(dim("⏸  stopping at the next tool call — ^C again to exit immediately"));
     } else if (!interrupt.hard) {
       interrupt.hard = true;
       cut.abort();

@@ -8,6 +8,7 @@
   "scripts": {
     "build": "esbuild src/agent.ts --bundle --platform=node --target=node20 --format=esm --packages=bundle --sourcemap --outfile=dist/agent.js",
     "typecheck": "tsc --noEmit",
+    "test": "esbuild src/*.test.ts --bundle --platform=node --target=node20 --format=esm --packages=external --outdir=dist/tests && node --test dist/tests/*.test.js",
     "dev": "npm run build -- --watch"
   },
   "dependencies": {
