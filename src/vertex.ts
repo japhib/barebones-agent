@@ -42,6 +42,8 @@ export interface VertexOptions {
  * Vertex tokens expire in about an hour, which for a long-lived process would mean
  * refresh logic. This agent does one turn per invocation, so minting a fresh token per
  * run costs one subprocess and removes the problem entirely.
+ * 
+ * FIXME: this is probably going to slow down Vertex usage long term
  */
 export function vertexAccessToken(): string {
   const fromEnv = process.env.VERTEX_ACCESS_TOKEN || process.env.GOOGLE_ACCESS_TOKEN;

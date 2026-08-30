@@ -224,7 +224,12 @@ export function cap(s: string, limit = MAX_TOOL_OUTPUT): string {
 
 /** Every path the agent touches goes through here. */
 export function resolveSafe(p: string): string {
-  const abs = path.resolve(CWD, p);
+  // A leading "~" is a home-directory reference on the shell, not a literal directory
+  // name (path.resolve treats it literally and would quietly resolve "~/../etc" to
+  // CWD/etc). Expand it first so the outside check below can judge it honestly: home is
+  // never the current directory, so "~/..." is refused rather than silently contained.
+  const expanded = p.replace(/^~(?=$|\/)/, os.homedir());
+  const abs = path.resolve(CWD, expanded);
   if (abs !== CWD && !abs.startsWith(CWD + path.sep)) {
     throw new Error(`Refused: "${p}" resolves outside the current directory.`);
   }

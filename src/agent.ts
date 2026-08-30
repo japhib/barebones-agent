@@ -119,7 +119,7 @@ function loadConfig(): Config {
   return cfg;
 }
 
-function resolveEditor(cliEditor: string | undefined, cfg: Config): string[] {
+export function resolveEditor(cliEditor: string | undefined, cfg: Config): string[] {
   const raw = cliEditor
     ? cliEditor.split(/\s+/)
     : cfg.editor.length
@@ -179,7 +179,7 @@ function loadSession(cfg: Config, id: string): Session {
 
 /** The opening prompt, as a one-line label for a session. Read from the transcript
  *  rather than the history, which starts with the mode announcement. */
-function sessionTitle(cfg: Config, s: Session): string {
+export function sessionTitle(cfg: Config, s: Session): string {
   let text = "";
   const p = mdPath(cfg, s.id);
   if (fs.existsSync(p)) {
@@ -203,11 +203,11 @@ function sessionTitle(cfg: Config, s: Session): string {
 
 /** Anthropic is the default, so naming it every time is noise; anything else is worth
  *  seeing, because the same model id can mean a different API and a different bill. */
-function modelLabel(s: Session): string {
+export function modelLabel(s: Session): string {
   return s.provider === "anthropic" ? s.model : `${s.provider}:${s.model}`;
 }
 
-function ago(ms: number): string {
+export function ago(ms: number): string {
   const secs = Math.max(0, (Date.now() - ms) / 1000);
   if (secs < 60) return `${Math.round(secs)}s ago`;
   if (secs < 3_600) return `${Math.round(secs / 60)}m ago`;
@@ -220,7 +220,7 @@ function ago(ms: number): string {
  * resumes it. Sessions live beside the project (cfg.sessionDir), so this is inherently
  * scoped to the current directory — there is no global list to filter.
  */
-function listSessions(cfg: Config): void {
+export function listSessions(cfg: Config): void {
   const dir = sessionDir(cfg);
   const rel = path.relative(CWD, dir) || dir;
   const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith(".json")) : [];
@@ -275,7 +275,7 @@ function listSessions(cfg: Config): void {
  *
  *  Every path that persists a turn goes through here, so this is also where a history
  *  left dangling by an interrupt, a timeout or a blown maxToolCalls is repaired. */
-function slim(messages: readonly Message[]): Message[] {
+export function slim(messages: readonly Message[]): Message[] {
   return repairDangling(messages)
     .filter((m) => m.role !== "system" && m.role !== "developer")
     .map((m) => {
@@ -301,7 +301,7 @@ function appendTranscript(cfg: Config, s: Session, text: string): void {
 }
 
 /** The prompt is everything after the final "## You" heading. */
-function readPromptFromTranscript(cfg: Config, s: Session): string {
+export function readPromptFromTranscript(cfg: Config, s: Session): string {
   const p = mdPath(cfg, s.id);
   if (!fs.existsSync(p)) return "";
   const text = fs.readFileSync(p, "utf8");
@@ -315,7 +315,7 @@ function readPromptFromTranscript(cfg: Config, s: Session): string {
 
 /** Checked boxes from the most recent question block. Only consulted while a
  *  question is actually pending, so stale ticks from earlier turns are ignored. */
-function readTickedOptions(cfg: Config, s: Session): string[] {
+export function readTickedOptions(cfg: Config, s: Session): string[] {
   const p = mdPath(cfg, s.id);
   if (!fs.existsSync(p)) return [];
   const text = fs.readFileSync(p, "utf8");
@@ -336,7 +336,7 @@ function ensurePromptStub(cfg: Config, s: Session): void {
   }
 }
 
-function renderQuestion(q: PendingQuestion): string {
+export function renderQuestion(q: PendingQuestion): string {
   const lines = [`\n## Agent asks\n`, `**${q.question}**\n`];
   if (q.options.length) {
     lines.push(
@@ -348,7 +348,7 @@ function renderQuestion(q: PendingQuestion): string {
   return lines.join("\n");
 }
 
-function renderApproval(b: PendingBash, s: Session): string {
+export function renderApproval(b: PendingBash, s: Session): string {
   const run = `${invocation()} -s ${s.id}`;
   return [
     `\n## ⚠️  Approval required\n`,
@@ -372,7 +372,7 @@ function renderApproval(b: PendingBash, s: Session): string {
  * opens the transcript it is gone. This list is the only durable record of the calls
  * they stopped to ask about.
  */
-function renderInterrupted(calls: string[], forced: boolean): string {
+export function renderInterrupted(calls: string[], forced: boolean): string {
   const what = calls.length
     ? `_Stopped after ${calls.length} tool call${calls.length === 1 ? "" : "s"}._\n`
     : `_Stopped before it made any tool calls._\n`;
@@ -389,7 +389,7 @@ function renderInterrupted(calls: string[], forced: boolean): string {
 
 /** Delivered as a trailing user message, the way modeMessage announces a mode change.
  *  It lands after the cached prefix, so unlike editing SYSTEM_PROMPT it costs no hit. */
-function interruptedMessage(n: number): string {
+export function interruptedMessage(n: number): string {
   return (
     `[interrupted] The user pressed Ctrl-C and stopped you after ${n} tool call${n === 1 ? "" : "s"}. ` +
     `The tool results above are real; any marked as never run did not run. Their next ` +
@@ -437,7 +437,7 @@ Write your final answer as Markdown. Be concise and concrete: reference files as
 path:line, show only the code that matters, and say plainly what you did and what you
 did not do.`;
 
-function modeMessage(mode: Mode): string {
+export function modeMessage(mode: Mode): string {
   return mode === "plan"
     ? "[mode: plan] Investigate and produce a plan. Do not modify anything — the editing tools will refuse to run."
     : "[mode: act] You may modify files. Carry out the task.";
@@ -452,7 +452,7 @@ function modeMessage(mode: Mode): string {
  * before persisting — so whatever carries usage in history right now is exactly this
  * turn. (chat.totalUsage would be simpler but silently omits cache_creation_tokens.)
  */
-function turnUsage(history: readonly Message[], price: ModelPrice | undefined): Usage {
+export function turnUsage(history: readonly Message[], price: ModelPrice | undefined): Usage {
   const u = zeroUsage();
   for (const m of history) {
     const x = m.usage;
@@ -471,7 +471,7 @@ function turnUsage(history: readonly Message[], price: ModelPrice | undefined): 
  *  marks the running total as incomplete rather than quietly adding zero. A model with
  *  no separate cache rate is billed at the plain input rate for those tokens, which
  *  over-counts rather than under-counts. */
-function priceUsage(u: Usage, price: ModelPrice | undefined): Usage {
+export function priceUsage(u: Usage, price: ModelPrice | undefined): Usage {
   if (!price) return { ...u, costUsd: 0, priced: u.requests === 0 };
   u.costUsd =
     (u.input * price.input +
@@ -482,11 +482,11 @@ function priceUsage(u: Usage, price: ModelPrice | undefined): Usage {
   return u;
 }
 
-function money(usd: number): string {
+export function money(usd: number): string {
   return `$${usd < 1 ? usd.toFixed(4) : usd.toFixed(2)}`;
 }
 
-function addUsage(total: Usage, next: Usage): Usage {
+export function addUsage(total: Usage, next: Usage): Usage {
   return {
     input: total.input + next.input,
     cacheRead: total.cacheRead + next.cacheRead,
@@ -501,7 +501,7 @@ function addUsage(total: Usage, next: Usage): Usage {
 
 const n = (x: number): string => x.toLocaleString("en-US");
 
-function formatUsage(label: string, u: Usage, reportsCache = true): string {
+export function formatUsage(label: string, u: Usage, reportsCache = true): string {
   // Anthropic reports input_tokens as the uncached remainder, so the real input
   // volume is the three categories added together.
   const totalIn = u.input + u.cacheRead + u.cacheWrite;
@@ -528,7 +528,7 @@ function formatUsage(label: string, u: Usage, reportsCache = true): string {
  * from the prompt. On its own it means "proceed", so the plan just written becomes the
  * instruction rather than making the user restate it.
  */
-function extractMode(prompt: string): { prompt: string; mode: Mode | null } {
+export function extractMode(prompt: string): { prompt: string; mode: Mode | null } {
   const lines = prompt.split("\n");
   let mode: Mode | null = null;
   const kept = lines.filter((line) => {
@@ -556,7 +556,7 @@ function extractMode(prompt: string): { prompt: string; mode: Mode | null } {
  * id is in the bundled registry — and load-bearing for Vertex, which has no entries
  * there at all.
  */
-function ensureModelKnown(session: Session, cfg: Config): void {
+export function ensureModelKnown(session: Session, cfg: Config): void {
   const { model, provider } = session;
   if (ModelRegistry.find(model, provider)) return;
   const spec = providerSpec(provider);
@@ -585,7 +585,7 @@ function ensureModelKnown(session: Session, cfg: Config): void {
 }
 
 /** Tool inputs arrive as a JSON string; parse it, never string-match it. */
-function describeCall(call: unknown): { name: string; args: string } {
+export function describeCall(call: unknown): { name: string; args: string } {
   const c = call as { function?: { name?: string; arguments?: string } };
   const name = c.function?.name ?? "tool";
   try {
@@ -602,7 +602,7 @@ function describeCall(call: unknown): { name: string; args: string } {
 /** " lines 40-120" for a read_file call, mirroring the slice the tool will take.
  *  A read with neither bound is the whole file, and saying "lines 1-2000" about a
  *  40-line file would be a lie, so that case gets no suffix. */
-function readRange(a: Record<string, unknown>): string {
+export function readRange(a: Record<string, unknown>): string {
   const offset = typeof a.offset === "number" ? a.offset : undefined;
   const limit = typeof a.limit === "number" ? a.limit : undefined;
   if (offset === undefined && limit === undefined) return "";
@@ -612,7 +612,7 @@ function readRange(a: Record<string, unknown>): string {
 }
 
 /** A bare "Request timeout after 30000ms" tells the user nothing about what stalled. */
-function explainFailure(err: unknown, cfg: Config): string {
+export function explainFailure(err: unknown, cfg: Config): string {
   const msg = err instanceof Error ? err.message : String(err);
   // fetchWithTimeout rethrows a raw AbortError when something other than its own timeout
   // controller fired — which, here, is always the user cutting the request.
@@ -1058,6 +1058,11 @@ async function main(): Promise<void> {
   process.stdout.write(`\n${session.mode} mode · continue with:\n↻  ${resume}${next}\n`);
 }
 
-main().catch((err: unknown) => {
-  die(err instanceof Error ? (err.stack ?? err.message) : String(err));
-});
+// Run as a CLI only when invoked directly (e.g. `node dist/agent.js` or the `bba` bin),
+// not when the module is imported by a unit test.
+const ENTRY = process.argv[1] ?? "";
+if (ENTRY && path.basename(ENTRY) === "agent.js") {
+  main().catch((err: unknown) => {
+    die(err instanceof Error ? (err.stack ?? err.message) : String(err));
+  });
+}
