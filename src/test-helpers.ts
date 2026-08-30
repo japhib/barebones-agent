@@ -18,7 +18,11 @@ import {
 
 export function fakeConfig(over: Partial<Config> = {}): Config {
   return {
+    provider: "anthropic",
     model: "claude-opus-5",
+    summaryModel: null,
+    vertexProject: null,
+    vertexRegion: "us-east5",
     editor: [],
     renderer: "none",
     sessionDir: ".agent",
@@ -35,6 +39,7 @@ export function fakeConfig(over: Partial<Config> = {}): Config {
 export function fakeSession(over: Partial<Session> = {}): Session {
   return {
     id: "testsess",
+    provider: "anthropic",
     model: "claude-opus-5",
     mode: "act",
     announcedMode: null,

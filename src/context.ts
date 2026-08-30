@@ -31,29 +31,81 @@ export const TREE_SKIP = new Set([".git", "node_modules", "dist", ".agent"]);
 export type Mode = "plan" | "act";
 export type Renderer = "auto" | "glow" | "bat" | "none";
 
-/** US dollars per million tokens. cacheWrite is the 1h-TTL rate (2x input); the 5m
- *  rate would be 1.25x, but this agent always writes with ttl:"1h". */
+/**
+ * US dollars per million tokens.
+ *
+ * `cacheRead` and `cacheWrite` are optional because not every provider bills them:
+ * Anthropic charges 2x input to write a 1h-TTL entry (the 5m rate would be 1.25x, but
+ * this agent always writes with ttl:"1h") and 0.1x to read one, while DeepSeek caches
+ * automatically, charges nothing to write, and bills a hit at a reduced input rate. A
+ * missing rate falls back to `input`, which over-counts rather than quietly reporting
+ * cached tokens as free.
+ */
 export interface ModelPrice {
   input: number;
   output: number;
-  cacheRead: number;
-  cacheWrite: number;
+  cacheRead?: number;
+  cacheWrite?: number;
 }
 
-/** Seeded from Anthropic's published rates. Prices change; override per model in
- *  config under "pricing" rather than editing this. */
-export const DEFAULT_PRICING: Record<string, ModelPrice> = {
+/** Anthropic's published rates. Vertex serves the same models at the same list prices,
+ *  so both namespaces are generated from this one table. */
+const CLAUDE_PRICING: Record<string, ModelPrice> = {
   "claude-opus-5": { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 10 },
   "claude-opus-4-8": { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 10 },
   "claude-opus-4-7": { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 10 },
   "claude-sonnet-5": { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 4 },
   "claude-sonnet-4-6": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 6 },
+  "claude-sonnet-4-5": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 6 },
   "claude-haiku-4-5": { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 2 },
   "claude-fable-5": { input: 10, output: 50, cacheRead: 1, cacheWrite: 20 },
 };
 
+function namespaced(provider: string, table: Record<string, ModelPrice>): Record<string, ModelPrice> {
+  return Object.fromEntries(Object.entries(table).map(([id, price]) => [`${provider}/${id}`, price]));
+}
+
+/**
+ * Seeded from each provider's published rates, keyed "<provider>/<model>" so that two
+ * providers serving a model of the same name keep separate prices. Prices change, and
+ * the DeepSeek rates below are a seed rather than a promise — override per model in
+ * config under "pricing" rather than editing this.
+ */
+export const DEFAULT_PRICING: Record<string, ModelPrice> = {
+  ...namespaced("anthropic", CLAUDE_PRICING),
+  ...namespaced("vertex", CLAUDE_PRICING),
+  // No cacheWrite: DeepSeek populates its cache as a side effect of a normal request
+  // and bills nothing for it, so there is no third category to report.
+  "deepseek/deepseek-chat": { input: 0.28, output: 0.42, cacheRead: 0.028 },
+  "deepseek/deepseek-reasoner": { input: 0.28, output: 0.42, cacheRead: 0.028 },
+};
+
+/**
+ * The price for a model, tolerating every key form a config might use.
+ *
+ * A bare model id still works, which is what configs written before providers existed
+ * contain. Vertex's "@version" suffix is stripped on the way through, so
+ * `claude-sonnet-4-5@20250929` finds the `claude-sonnet-4-5` rate.
+ */
+export function priceFor(cfg: Config, provider: string, model: string): ModelPrice | undefined {
+  const bare = model.split("@")[0] as string;
+  return (
+    cfg.pricing[`${provider}/${model}`] ??
+    cfg.pricing[`${provider}/${bare}`] ??
+    cfg.pricing[model] ??
+    cfg.pricing[bare]
+  );
+}
+
 export interface Config {
+  /** A key of PROVIDERS in providers.ts: which API new sessions talk to. */
+  provider: string;
   model: string;
+  /** Model used to write compaction summaries. Null takes the provider's own default. */
+  summaryModel: string | null;
+  /** Vertex only. The project is required; the region defaults to us-east5. */
+  vertexProject: string | null;
+  vertexRegion: string;
   editor: string[];
   renderer: Renderer;
   sessionDir: string;
@@ -83,6 +135,10 @@ export interface PendingBash {
  * Anthropic bills three kinds of input separately, so they are counted separately:
  * `input` is what was neither cached nor written (1x), `cacheRead` is served from cache
  * (0.1x), `cacheWrite` is what was stored into it (2x at the 1h TTL we use).
+ *
+ * Providers that report fewer categories leave the rest at zero — DeepSeek's NodeLLM
+ * client, for one, discards its cache-hit count, so every token there lands in `input`
+ * and the turn is priced as if nothing was cached.
  */
 export interface Usage {
   input: number;
@@ -103,6 +159,9 @@ export function zeroUsage(): Usage {
 
 export interface Session {
   id: string;
+  /** Pinned per session, not read from config on resume: a session's history is full of
+   *  one provider's tool-call ids and message shapes, and cannot move to another. */
+  provider: string;
   model: string;
   mode: Mode;
   /** Mode is announced to the model only when it changes; re-announcing every turn

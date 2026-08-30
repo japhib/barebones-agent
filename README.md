@@ -20,6 +20,8 @@ export ANTHROPIC_API_KEY=...
 export TAVILY_API_KEY=...     # optional, enables web_search
 ```
 
+Anthropic is the default; DeepSeek and Vertex AI work too — see [Providers](#providers).
+
 Optionally `npm link` to get `bba` on your PATH; otherwise call `node dist/agent.js`.
 
 ## Usage
@@ -42,6 +44,7 @@ Every run prints the exact command to continue:
 | Flag | |
 |---|---|
 | `--plan` / `--act` | Switch mode; persists in the session |
+| `--provider <name>` | `anthropic` (default), `deepseek` or `vertex`; pinned to the session |
 | `--approve` | Run the pending shell command once (non-interactive fallback) |
 | `--always-approve` | Run it, and never ask for that exact command again |
 | `--decline [reason]` | Refuse it; with no reason, hands control back to you |
@@ -220,6 +223,75 @@ With no terminal to ask on — piped stdin, a cron job, CI — it falls back to 
 transcript flow instead of hanging: the request is written out and the turn ends, to be
 answered with `--approve`, `--always-approve` or `--decline [reason]` on the next run.
 
+## Providers
+
+Set the default in config, or pass `--provider` to start a session on another one. The
+provider is **pinned to the session**: a history is written in one API's dialect, with
+its tool-call ids and message shapes, so `--provider` on a resume is refused rather than
+silently reinterpreted. Sessions written before providers existed resume as `anthropic`.
+
+| | Credential | Default model | Notes |
+|---|---|---|---|
+| `anthropic` | `ANTHROPIC_API_KEY` | `claude-opus-5` | Prompt caching, full usage breakdown |
+| `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-chat` | No cache reporting — see below |
+| `vertex` | `gcloud`, or `VERTEX_ACCESS_TOKEN` | `claude-sonnet-4-5@20250929` | Claude on GCP; caching works |
+
+`bba -l` and the run banner label anything other than Anthropic as `provider:model`.
+
+### DeepSeek
+
+```sh
+export DEEPSEEK_API_KEY=...
+bba --provider deepseek "explain what this project does"
+```
+
+NodeLLM ships a DeepSeek client, so this is ordinary plumbing. Two things differ from
+Anthropic. `cache_control` is not sent: every NodeLLM provider spreads unrecognised
+request keys straight into the JSON body, so on an OpenAI-shaped API it would arrive as
+an unknown top-level field rather than being ignored. DeepSeek caches automatically
+anyway, and charges nothing to write.
+
+The cache accounting is the real gap. DeepSeek's API returns `prompt_cache_hit_tokens`,
+but NodeLLM's client discards it before this agent sees it, so every token arrives
+looking uncached. Rather than print a `0% cached` that describes the missing data instead
+of the run, usage for such a provider drops the breakdown and marks the cost as a
+ceiling:
+
+```
+turn     in 1,200  out 15  ·  1 request  ·  up to $0.0003
+```
+
+The real bill is lower by whatever fraction was served from cache.
+
+### Vertex AI
+
+```sh
+gcloud auth application-default login
+bba --provider vertex --model claude-sonnet-4-5@20250929 "..."
+```
+
+Needs a project: `vertexProject` in the config, or `VERTEX_PROJECT` in the environment.
+`vertexRegion` defaults to `us-east5`; `global` is understood and drops the host prefix.
+Model ids carry Vertex's `@version` suffix and there are no floating aliases, so
+`--model` wants the full id.
+
+Credentials are an OAuth token, not a static key. One is minted per run with
+`gcloud auth print-access-token`, or taken from `VERTEX_ACCESS_TOKEN` /
+`GOOGLE_ACCESS_TOKEN` if set. Tokens last about an hour, which for a long-lived process
+would mean refresh logic — but this agent is one turn per invocation, so a fresh token
+per run costs one subprocess and removes the problem.
+
+This is the one provider written here rather than by NodeLLM (`src/vertex.ts`), because
+none of NodeLLM's knobs can reach Vertex: its Anthropic client posts to
+`${baseUrl}/messages` with the model in the JSON body and the key in an `x-api-key`
+header, while Vertex puts the model in the URL, wants `anthropic_version` in the body,
+and authenticates with a bearer token. It is passed to `createLLM({ provider })` as an
+instance. Only the shapes this agent actually sends are converted — text, `tool_use`,
+`tool_result` — because no tool here produces an image or a PDF.
+
+`cache_control` works exactly as on the first-party API, and the usage fields come back
+in the same three categories, so caching and cost reporting are unchanged.
+
 ## Configuration
 
 `~/.barebones-agent/config.json`, created on first run. Precedence is
@@ -227,7 +299,11 @@ CLI flag → environment → config file → default.
 
 ```json
 {
+  "provider": "anthropic",
   "model": "claude-opus-5",
+  "summaryModel": null,
+  "vertexProject": null,
+  "vertexRegion": "us-east5",
   "editor": ["code", "--wait"],
   "renderer": "auto",
   "sessionDir": ".agent",
@@ -237,14 +313,24 @@ CLI flag → environment → config file → default.
   "requestTimeoutMs": 600000,
   "bashTimeoutMs": 120000,
   "pricing": {
-    "claude-opus-5": { "input": 5, "output": 25, "cacheRead": 0.5, "cacheWrite": 10 }
+    "anthropic/claude-opus-5": { "input": 5, "output": 25, "cacheRead": 0.5, "cacheWrite": 10 }
   }
 }
 ```
 
 `pricing` is US dollars per million tokens and merges per model over the built-in table,
 so overriding one model keeps the rest. `cacheWrite` is the **1h-TTL** rate (2× input),
-which is what this agent always writes at.
+which is what this agent always writes at, and both cache rates are optional — leave them
+out for a provider that does not bill those separately and the input rate is used.
+
+Keys are `provider/model`, so two providers serving a model of the same name keep
+separate rates. A bare `"claude-opus-5"` still works and applies to every provider, which
+is what configs written before providers existed contain. Vertex's `@version` suffix is
+stripped before the lookup, so `claude-sonnet-4-5@20250929` finds the
+`vertex/claude-sonnet-4-5` rate.
+
+`summaryModel` overrides the cheap model used for compaction summaries; `null` takes the
+provider's default.
 
 `editor` is an argv array, so there is no shell quoting to get wrong. Known GUI editors
 (`code`, `subl`, `zed`, …) get `--wait` appended automatically — without it they return
@@ -296,14 +382,16 @@ Costs come from the local `pricing` table, accumulate in dollars (so a mid-sessi
 model with no configured price still reports tokens, and the total is marked `$0.0283+
 (some models unpriced)` rather than quietly counting it as free.
 
-**Rates are a local table and will go stale** — check them against Anthropic's pricing
-page before trusting a number, and override in config when they change.
+**Rates are a local table and will go stale** — check them against the provider's pricing
+page before trusting a number, and override in config when they change. The DeepSeek
+rates in particular are a seed, not a promise.
 
 ## Compaction
 
 Off by default. Set `compactAt` to an input-token threshold, or force it with `--compact`.
 The first user message and the last four turns are kept verbatim; everything between is
-summarised by a cheap Haiku call. Cuts always land on a turn boundary, so a tool call is
+summarised by one cheap call — Haiku on Anthropic and Vertex, `deepseek-chat` on
+DeepSeek, or whatever `summaryModel` names. Cuts always land on a turn boundary, so a tool call is
 never separated from its result.
 
 Compaction rewrites the prefix and therefore throws away the cache, which is why it is
@@ -313,11 +401,13 @@ record — compaction only affects what is sent to the model.
 ## Layout
 
 ```
-src/context.ts   shared types, path guard, tool context
-src/tools.ts     the nine tools
-src/progress.ts  stderr activity display
-src/compact.ts   history compaction
-src/agent.ts     config, session, transcript, main
+src/context.ts    shared types, pricing table, path guard, tool context
+src/tools.ts      the nine tools
+src/progress.ts   stderr activity display
+src/compact.ts    history compaction
+src/providers.ts  the provider table, and building a client from it
+src/vertex.ts     the Vertex AI provider NodeLLM does not ship
+src/agent.ts      config, session, transcript, main
 ```
 
 ## Timeouts
@@ -335,9 +425,17 @@ saved to the session first, so nothing already done is lost.
 - `@node-llm/core` 1.17.0's model registry does not know `claude-opus-5`. Rather than
   skip validation (which drops the output ceiling to 8k and logs a warning every run),
   the agent registers unknown models with `ModelRegistry.save()` before use, taking
-  their rates from the `pricing` config. Any newer model id works the same way.
+  their rates from the `pricing` config. Any newer model id works the same way. This is
+  a no-op for DeepSeek, whose four models the bundled registry does know, and
+  load-bearing for Vertex, which has no entries there at all.
+- Its providers are `anthropic`, `bedrock`, `deepseek`, `gemini`, `mistral`, `ollama`,
+  `openai`, `openrouter` and `xai` — no Vertex, hence `src/vertex.ts`.
 - NodeLLM does not emit `cache_control` itself; unknown params are spread into the
-  request body, which is how top-level auto-caching is reached.
+  request body, which is how top-level auto-caching is reached. That same spread is why
+  it is sent only to Anthropic and Vertex: elsewhere it would be an unknown body field,
+  not an ignored one.
+- Its DeepSeek client maps only `prompt_tokens` and `completion_tokens`, dropping
+  `prompt_cache_hit_tokens`, so no cache breakdown is available on that provider.
 - Its default agentic loop cap is 5 tool rounds (`maxToolCalls`), raised to 50 here.
 - `chat.totalUsage` omits `cache_creation_tokens`, so usage is summed from the per-message
   `usage` NodeLLM attaches to history instead.

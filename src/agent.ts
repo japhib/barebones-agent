@@ -7,7 +7,7 @@
  * command — it records the request in the session transcript, saves state, and exits
  * with a hint for re-invoking.
  */
-import { ModelRegistry, createLLM, type Message } from "@node-llm/core";
+import { ModelRegistry, type Message, type NodeLLMCore } from "@node-llm/core";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -16,6 +16,7 @@ import { parseArgs } from "node:util";
 
 import { compactHistory, repairDangling } from "./compact.js";
 import { Progress, dim } from "./progress.js";
+import { PROVIDERS, createClient, providerSpec, summaryModel } from "./providers.js";
 import { INTERRUPT_HALT, TOOLS } from "./tools.js";
 import {
   APP_DIR,
@@ -25,6 +26,7 @@ import {
   DEFAULT_PRICING,
   DEFAULT_REQUEST_TIMEOUT_MS,
   MAX_READ_LINES,
+  priceFor,
   saveConfig,
   setContext,
   zeroUsage,
@@ -59,7 +61,11 @@ const ACT_STUB =
 const READY_MARKER = "<!-- !act -->";
 
 const DEFAULT_CONFIG: Config = {
+  provider: "anthropic",
   model: "claude-opus-5",
+  summaryModel: null,
+  vertexProject: null,
+  vertexRegion: "us-east5",
   editor: [],
   renderer: "auto",
   sessionDir: ".agent",
@@ -84,6 +90,9 @@ function have(cmd: string): boolean {
 
 // ---------------------------------------------------------------- config
 
+/** Config keys where null is a meaningful value rather than "leave the default". */
+const NULLABLE = new Set(["tavilyApiKey", "summaryModel", "vertexProject"]);
+
 function loadConfig(): Config {
   fs.mkdirSync(APP_DIR, { recursive: true });
   if (!fs.existsSync(CONFIG_PATH)) {
@@ -103,7 +112,7 @@ function loadConfig(): Config {
       process.stderr.write(`warning: unknown config key "${k}" in ${CONFIG_PATH}\n`);
       continue;
     }
-    if (v !== null || k === "tavilyApiKey") (cfg as Record<string, unknown>)[k] = v;
+    if (v !== null || NULLABLE.has(k)) (cfg as Record<string, unknown>)[k] = v;
   }
   // Merge per model, so overriding one rate doesn't drop every other model's.
   cfg.pricing = { ...DEFAULT_PRICING, ...(raw.pricing as Config["pricing"] | undefined) };
@@ -136,9 +145,10 @@ function mdPath(cfg: Config, id: string): string {
   return path.join(sessionDir(cfg), `${id}.md`);
 }
 
-function newSession(cfg: Config, model: string, mode: Mode): Session {
+function newSession(provider: string, model: string, mode: Mode): Session {
   return {
     id: randomUUID().slice(0, 8),
+    provider,
     model,
     mode,
     announcedMode: null,
@@ -158,6 +168,7 @@ function loadSession(cfg: Config, id: string): Session {
   if (!fs.existsSync(p)) die(`No session "${id}" under ${sessionDir(cfg)}/`);
   const s = JSON.parse(fs.readFileSync(p, "utf8")) as Session;
   s.usage ??= zeroUsage(); // sessions created before usage tracking
+  s.provider ??= "anthropic"; // ...and before there was more than one provider
   s.declinedCommand ??= null;
   s.interrupted ??= null;
   // Repaired on the way in as well as on the way out, so a session already poisoned by
@@ -190,6 +201,12 @@ function sessionTitle(cfg: Config, s: Session): string {
   return line.length > 72 ? `${line.slice(0, 71)}\u2026` : line;
 }
 
+/** Anthropic is the default, so naming it every time is noise; anything else is worth
+ *  seeing, because the same model id can mean a different API and a different bill. */
+function modelLabel(s: Session): string {
+  return s.provider === "anthropic" ? s.model : `${s.provider}:${s.model}`;
+}
+
 function ago(ms: number): string {
   const secs = Math.max(0, (Date.now() - ms) / 1000);
   if (secs < 60) return `${Math.round(secs)}s ago`;
@@ -215,6 +232,9 @@ function listSessions(cfg: Config): void {
       const s = JSON.parse(fs.readFileSync(p, "utf8")) as Session;
       s.id ||= path.basename(file, ".json");
       s.usage ??= zeroUsage();
+      // Back-filled here as well as in loadSession: this path reads the file directly,
+      // and a session written before providers existed has no provider to label with.
+      s.provider ??= "anthropic";
       found.push({ s, mtimeMs: fs.statSync(p).mtimeMs });
     } catch {
       process.stderr.write(dim(`skipped unreadable session file ${rel}/${file}`) + "\n");
@@ -239,7 +259,7 @@ function listSessions(cfg: Config): void {
           : "";
     const next = s.pendingBash ? "--approve" : "-e";
     const cost = s.usage.priced ? money(s.usage.costUsd) : `${money(s.usage.costUsd)}+`;
-    const meta = `${ago(mtimeMs)} \u00b7 ${s.mode} \u00b7 ${s.model} \u00b7 ${s.usage.turns} turn${s.usage.turns === 1 ? "" : "s"} \u00b7 ${cost}`;
+    const meta = `${ago(mtimeMs)} \u00b7 ${s.mode} \u00b7 ${modelLabel(s)} \u00b7 ${s.usage.turns} turn${s.usage.turns === 1 ? "" : "s"} \u00b7 ${cost}`;
     process.stdout.write(
       `\n  ${s.id}  ${dim(meta)}${waiting}\n` +
         `  ${dim(sessionTitle(cfg, s))}\n` +
@@ -275,7 +295,7 @@ function appendTranscript(cfg: Config, s: Session, text: string): void {
   fs.mkdirSync(sessionDir(cfg), { recursive: true });
   const p = mdPath(cfg, s.id);
   if (!fs.existsSync(p)) {
-    fs.writeFileSync(p, `# session ${s.id}  ·  mode: ${s.mode}  ·  ${s.model}\n`);
+    fs.writeFileSync(p, `# session ${s.id}  ·  mode: ${s.mode}  ·  ${modelLabel(s)}\n`);
   }
   fs.appendFileSync(p, text);
 }
@@ -448,13 +468,15 @@ function turnUsage(history: readonly Message[], price: ModelPrice | undefined): 
 }
 
 /** Prices are per million tokens. An unpriced model still reports tokens; it just
- *  marks the running total as incomplete rather than quietly adding zero. */
+ *  marks the running total as incomplete rather than quietly adding zero. A model with
+ *  no separate cache rate is billed at the plain input rate for those tokens, which
+ *  over-counts rather than under-counts. */
 function priceUsage(u: Usage, price: ModelPrice | undefined): Usage {
   if (!price) return { ...u, costUsd: 0, priced: u.requests === 0 };
   u.costUsd =
     (u.input * price.input +
-      u.cacheRead * price.cacheRead +
-      u.cacheWrite * price.cacheWrite +
+      u.cacheRead * (price.cacheRead ?? price.input) +
+      u.cacheWrite * (price.cacheWrite ?? price.input) +
       u.output * price.output) /
     1_000_000;
   return u;
@@ -479,16 +501,25 @@ function addUsage(total: Usage, next: Usage): Usage {
 
 const n = (x: number): string => x.toLocaleString("en-US");
 
-function formatUsage(label: string, u: Usage): string {
+function formatUsage(label: string, u: Usage, reportsCache = true): string {
   // Anthropic reports input_tokens as the uncached remainder, so the real input
   // volume is the three categories added together.
   const totalIn = u.input + u.cacheRead + u.cacheWrite;
-  const hit = totalIn ? Math.round((u.cacheRead / totalIn) * 100) : 0;
   const cost = u.priced ? money(u.costUsd) : `${money(u.costUsd)}+ (some models unpriced)`;
+  const requests = `${n(u.requests)} request${u.requests === 1 ? "" : "s"}`;
+
+  // With no cache breakdown there is nothing to split, and printing "0% cached" would
+  // describe the missing data rather than the run. The cost is a ceiling in that case:
+  // tokens that were in fact served from cache are billed here at the full input rate.
+  if (!reportsCache) {
+    return `${label.padEnd(8)} in ${n(totalIn)}  out ${n(u.output)}  ·  ${requests}  ·  up to ${cost}`;
+  }
+
+  const hit = totalIn ? Math.round((u.cacheRead / totalIn) * 100) : 0;
   return (
     `${label.padEnd(8)} in ${n(totalIn)} (${n(u.cacheRead)} cached · ${n(u.cacheWrite)} written · ` +
     `${n(u.input)} fresh)  out ${n(u.output)}  ·  ${hit}% cached, ` +
-    `${n(u.requests)} request${u.requests === 1 ? "" : "s"}  ·  ${cost}`
+    `${requests}  ·  ${cost}`
   );
 }
 
@@ -518,19 +549,25 @@ function extractMode(prompt: string): { prompt: string; mode: Mode | null } {
  * The bundled registry lags new releases, and an unknown id fails the tool-support
  * check outright. `assumeModelExists` skips that check but also drops max_output_tokens
  * to an 8k fallback and logs a warning on every run; registering the model properly
- * avoids all three problems. Anything newer than the bundled registry is a current
- * frontier model, hence the 1M/128k defaults.
+ * avoids all three problems. The limits come from the provider table, which assumes
+ * anything newer than the bundled registry is a current frontier model.
+ *
+ * This is a no-op for a provider whose models NodeLLM already knows — every DeepSeek
+ * id is in the bundled registry — and load-bearing for Vertex, which has no entries
+ * there at all.
  */
-function ensureModelKnown(model: string, cfg: Config): void {
-  if (ModelRegistry.find(model, "anthropic")) return;
-  const price = cfg.pricing[model];
+function ensureModelKnown(session: Session, cfg: Config): void {
+  const { model, provider } = session;
+  if (ModelRegistry.find(model, provider)) return;
+  const spec = providerSpec(provider);
+  const price = priceFor(cfg, provider, model);
   ModelRegistry.save({
     id: model,
     name: model,
-    provider: "anthropic",
-    family: "claude",
-    context_window: 1_000_000,
-    max_output_tokens: 128_000,
+    provider,
+    family: spec.family,
+    context_window: spec.contextWindow,
+    max_output_tokens: spec.maxOutputTokens,
     modalities: { input: ["text", "image", "pdf"], output: ["text"] },
     capabilities: ["streaming", "reasoning", "chat", "vision", "function_calling", "tools", "structured_output", "json_mode"],
     ...(price && {
@@ -656,6 +693,8 @@ const HELP = `barebones-agent — one turn of work per invocation.
   bba -l | --sessions             list this directory's sessions and how to resume each
 
   --plan | --act                  switch mode (persists in the session)
+  --provider <name>               anthropic (default), deepseek or vertex; pinned to
+                                  the session, so it cannot be changed on a resume
   --approve | --always-approve    allow the pending shell command
   --decline [reason]              refuse it; with no reason, hands back to you
   --compact                       compact the history now
@@ -685,6 +724,7 @@ async function main(): Promise<void> {
       compact: { type: "boolean" },
       "compact-at": { type: "string" },
       model: { type: "string" },
+      provider: { type: "string" },
       editor: { type: "string" },
       timeout: { type: "string" },
       "bash-timeout": { type: "string" },
@@ -713,9 +753,24 @@ async function main(): Promise<void> {
   }
 
   const mode: Mode = values.plan ? "plan" : values.act ? "act" : "act";
-  const session = values.session
-    ? loadSession(cfg, values.session)
-    : newSession(cfg, values.model || cfg.model, mode);
+  const provider = values.provider || cfg.provider;
+  if (!(provider in PROVIDERS)) {
+    die(`Unknown provider "${provider}". Known: ${Object.keys(PROVIDERS).join(", ")}.`);
+  }
+  // cfg.model belongs to cfg.provider, so asking for a different provider on the command
+  // line without naming a model means that provider's default, not the configured one.
+  const model = values.model || (values.provider ? providerSpec(provider).defaultModel : cfg.model);
+  const session = values.session ? loadSession(cfg, values.session) : newSession(provider, model, mode);
+  // A session's history is written in one provider's dialect, so --provider on a resume
+  // is a mistake worth naming rather than a switch to honour.
+  if (values.session && values.provider && values.provider !== session.provider) {
+    die(
+      `Session ${session.id} runs on ${session.provider}; it cannot be moved to ${values.provider}. ` +
+        `Start a new session instead.`,
+    );
+  }
+  // Read off the session rather than the flags, so a resumed session keeps its own.
+  const spec = providerSpec(session.provider);
   if (values.model) session.model = values.model;
   if (values.plan) session.mode = "plan";
   if (values.act) session.mode = "act";
@@ -727,9 +782,9 @@ async function main(): Promise<void> {
 
   if (values.usage) {
     // Read-only: report what the session has spent without calling the model.
-    process.stdout.write(`${formatUsage("session", session.usage)}\n`);
+    process.stdout.write(`${formatUsage("session", session.usage, spec.reportsCache)}\n`);
     process.stdout.write(
-      `         across ${session.usage.turns} turn${session.usage.turns === 1 ? "" : "s"} · ${session.mode} mode · ${session.model}\n`,
+      `         across ${session.usage.turns} turn${session.usage.turns === 1 ? "" : "s"} · ${session.mode} mode · ${modelLabel(session)}\n`,
     );
     return;
   }
@@ -796,15 +851,21 @@ async function main(): Promise<void> {
 
   if (!values.quiet) {
     const switched = directive.mode || values.plan || values.act ? "  (switched)" : "";
-    process.stderr.write(dim(`${session.mode} mode · ${session.model} · session ${session.id}${switched}`) + "\n");
+    process.stderr.write(dim(`${session.mode} mode · ${modelLabel(session)} · session ${session.id}${switched}`) + "\n");
   }
 
   // --- run ----------------------------------------------------------------
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) die("ANTHROPIC_API_KEY is not set.");
-
-  ensureModelKnown(session.model, cfg);
-  const llm = createLLM({ provider: "anthropic", anthropicApiKey: apiKey });
+  ensureModelKnown(session, cfg);
+  // Typed rather than inferred: an evolving `any` here would silently unchecked the
+  // whole chat chain built from it.
+  let llm: NodeLLMCore;
+  try {
+    // Credentials are resolved here, not at startup: everything above this line —
+    // listing sessions, reporting usage, collecting a prompt — works without them.
+    llm = createClient(cfg, session.provider);
+  } catch (err) {
+    die(err instanceof Error ? err.message : String(err));
+  }
   const chat = llm
     .chat(session.model, {
       maxTokens: MAX_OUTPUT_TOKENS,
@@ -817,9 +878,13 @@ async function main(): Promise<void> {
 
   if (values.compact || (cfg.compactAt > 0 && session.lastInputTokens > cfg.compactAt)) {
     const before = session.messages.length;
-    const compacted = await compactHistory(session.messages, { llm, keepRecentTurns: KEEP_RECENT_TURNS });
+    const compacted = await compactHistory(session.messages, {
+      llm,
+      keepRecentTurns: KEEP_RECENT_TURNS,
+      summaryModel: summaryModel(cfg, session.provider),
+    });
     session.messages = compacted.messages;
-    session.usage = addUsage(session.usage, priceUsage(compacted.usage, cfg.pricing[compacted.model]));
+    session.usage = addUsage(session.usage, priceUsage(compacted.usage, priceFor(cfg, session.provider, compacted.model)));
     // Compaction rewrites the prefix, so the next request cannot hit the cache.
     session.announcedMode = null;
     if (values.verbose) process.stderr.write(`compacted ${before} → ${session.messages.length} messages\n`);
@@ -835,11 +900,12 @@ async function main(): Promise<void> {
     session.interrupted = null;
   }
 
-  chat
-    .withTools(TOOLS)
-    // NodeLLM never emits cache_control itself; unknown params are spread straight
-    // into the Anthropic request body, which is how we reach top-level auto-caching.
-    .withParams({ cache_control: { type: "ephemeral", ttl: "1h" } });
+  chat.withTools(TOOLS);
+  // NodeLLM never emits cache_control itself; unknown params are spread straight into
+  // the request body, which is how we reach Anthropic's top-level auto-caching. That
+  // same spread is why it must not be sent elsewhere: on an OpenAI-shaped API it would
+  // arrive as an unknown top-level field rather than being ignored.
+  if (spec.cacheControl) chat.withParams({ cache_control: { type: "ephemeral", ttl: "1h" } });
 
   // Progress. By the time onToolCallStart fires, the assistant message that requested
   // the call — including any text it wrote first — is already in chat.history, so the
@@ -884,7 +950,7 @@ async function main(): Promise<void> {
    *  can be cut short: a tool halting on the flag, and a request cut mid-flight. */
   const finishInterrupted = (forced: boolean): void => {
     progress.stop();
-    session.usage = addUsage(session.usage, turnUsage(chat.history, cfg.pricing[session.model]));
+    session.usage = addUsage(session.usage, turnUsage(chat.history, priceFor(cfg, session.provider, session.model)));
     session.messages = slim(chat.history);
     session.interrupted = calls;
     saveSession(cfg, session);
@@ -927,7 +993,7 @@ async function main(): Promise<void> {
     }
     // Persist whatever the turn accomplished; otherwise a failure mid-loop throws
     // away every tool call it already made.
-    session.usage = addUsage(session.usage, turnUsage(chat.history, cfg.pricing[session.model]));
+    session.usage = addUsage(session.usage, turnUsage(chat.history, priceFor(cfg, session.provider, session.model)));
     session.messages = slim(chat.history);
     saveSession(cfg, session);
     const why = explainFailure(err, cfg);
@@ -952,7 +1018,7 @@ async function main(): Promise<void> {
     raw.replace(READY_MARKER, "").trim() ||
     "_The model returned no content. This usually means the request was refused; the reason is not recoverable here. Try rephrasing._";
 
-  const spent = turnUsage(chat.history, cfg.pricing[session.model]);
+  const spent = turnUsage(chat.history, priceFor(cfg, session.provider, session.model));
   session.usage = addUsage(session.usage, spent);
   session.messages = slim(chat.history);
   session.lastInputTokens = res.input_tokens ?? 0;
@@ -984,7 +1050,9 @@ async function main(): Promise<void> {
   render(shown, cfg);
 
   if (values.verbose) {
-    process.stderr.write(`\n${formatUsage("turn", spent)}\n${formatUsage("session", session.usage)}\n`);
+    process.stderr.write(
+      `\n${formatUsage("turn", spent, spec.reportsCache)}\n${formatUsage("session", session.usage, spec.reportsCache)}\n`,
+    );
   }
   const next = session.pendingBash ? " --approve" : " -e";
   process.stdout.write(`\n${session.mode} mode · continue with:\n↻  ${resume}${next}\n`);

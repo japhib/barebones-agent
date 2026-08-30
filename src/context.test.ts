@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import test, { describe } from "node:test";
 
-import { CWD, MAX_TOOL_OUTPUT, cap, ctx, resolveSafe, zeroUsage } from "./context.js";
-import { useContext } from "./test-helpers.js";
+import { CWD, MAX_TOOL_OUTPUT, cap, ctx, priceFor, resolveSafe, zeroUsage } from "./context.js";
+import { fakeConfig, useContext } from "./test-helpers.js";
 
 describe("resolveSafe", () => {
   test("resolves paths inside the project to absolute", () => {
@@ -92,5 +92,35 @@ test("zeroUsage starts at zero and counts as fully priced", () => {
     turns: 0,
     costUsd: 0,
     priced: true,
+  });
+});
+
+describe("priceFor", () => {
+  test("prefers the provider's own rate over a bare model id", () => {
+    const cfg = fakeConfig({
+      pricing: { "claude-opus-5": { input: 1, output: 1 }, "anthropic/claude-opus-5": { input: 5, output: 25 } },
+    });
+    assert.equal(priceFor(cfg, "anthropic", "claude-opus-5")?.input, 5);
+  });
+
+  test("still honours a bare model id, which is what older configs contain", () => {
+    const cfg = fakeConfig({ pricing: { "claude-opus-5": { input: 5, output: 25 } } });
+    assert.equal(priceFor(cfg, "anthropic", "claude-opus-5")?.input, 5);
+  });
+
+  test("strips Vertex's @version suffix", () => {
+    assert.equal(priceFor(fakeConfig(), "vertex", "claude-sonnet-4-5@20250929")?.input, 3);
+  });
+
+  test("keeps two providers' rates for the same model name apart", () => {
+    const cfg = fakeConfig({
+      pricing: { "anthropic/shared": { input: 5, output: 25 }, "deepseek/shared": { input: 0.28, output: 0.42 } },
+    });
+    assert.equal(priceFor(cfg, "anthropic", "shared")?.input, 5);
+    assert.equal(priceFor(cfg, "deepseek", "shared")?.input, 0.28);
+  });
+
+  test("returns nothing for a model no table knows", () => {
+    assert.equal(priceFor(fakeConfig(), "deepseek", "deepseek-v4-pro"), undefined);
   });
 });
