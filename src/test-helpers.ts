@@ -1,15 +1,14 @@
 /**
  * Fakes shared by the unit tests. Nothing the agent ships imports this — it exists so
- * each test file can get a valid Ctx without restating all eleven Session fields.
+ * each test file can get a valid Ctx without restating all nine Session fields.
  */
 import fs from "node:fs";
 import path from "node:path";
 
 import { Progress } from "./progress.js";
-import { defaultModels } from "./providers.js";
 import {
   CWD,
-  DEFAULT_PRICING,
+  DEFAULT_BASE_URL,
   setContext,
   zeroUsage,
   type Config,
@@ -19,20 +18,15 @@ import {
 
 export function fakeConfig(over: Partial<Config> = {}): Config {
   return {
-    provider: "anthropic",
-    models: defaultModels(),
-    summaryModel: null,
-    vertexProject: null,
-    vertexRegion: "us-east5",
+    model: "test-model",
+    baseUrl: DEFAULT_BASE_URL,
+    apiKeyEnv: "LITELLM_MASTER_KEY",
     editor: [],
     renderer: "none",
     sessionDir: ".agent",
-    compactAt: 0,
     alwaysApprove: [],
-    tavilyApiKey: null,
     requestTimeoutMs: 1_000,
     bashTimeoutMs: 1_000,
-    pricing: DEFAULT_PRICING,
     ...over,
   };
 }
@@ -40,12 +34,10 @@ export function fakeConfig(over: Partial<Config> = {}): Config {
 export function fakeSession(over: Partial<Session> = {}): Session {
   return {
     id: "testsess",
-    provider: "anthropic",
-    model: "claude-opus-5",
+    model: "test-model",
     mode: "act",
     announcedMode: null,
     messages: [],
-    lastInputTokens: 0,
     usage: zeroUsage(),
     pendingQuestion: null,
     pendingBash: null,

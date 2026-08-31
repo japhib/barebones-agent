@@ -1,5 +1,5 @@
 /**
- * The agent's tools. All nine are registered on every request regardless of mode:
+ * The agent's tools. All eight are registered on every request regardless of mode:
  * tool definitions sit at the front of the prompt-cache prefix, so varying the list
  * between plan and act would invalidate the whole cache on every switch. Plan mode is
  * enforced inside the mutating tools instead.
@@ -10,7 +10,6 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
-  CONFIG_PATH,
   CWD,
   DEFAULT_TREE_DEPTH,
   MAX_CHANGE_LINES,
@@ -80,14 +79,8 @@ const listTreeArgs = z.object({
 class ListTreeTool extends SafeTool<z.infer<typeof listTreeArgs>> {
   name = "list_tree";
   description =
-    "Recursively list the directory structure with permissions, size and mtime, like `ls -al` over a tree. Use this first to orient yourself in an unfamiliar project.";
+    "Recursively list the directory structure as an indented tree. Use this first to orient yourself in an unfamiliar project.";
   schema = listTreeArgs;
-
-  private perms(st: fs.Stats): string {
-    const rwx = (n: number) => `${n & 4 ? "r" : "-"}${n & 2 ? "w" : "-"}${n & 1 ? "x" : "-"}`;
-    const kind = st.isDirectory() ? "d" : st.isSymbolicLink() ? "l" : "-";
-    return kind + rwx((st.mode >> 6) & 7) + rwx((st.mode >> 3) & 7) + rwx(st.mode & 7);
-  }
 
   private walk(dir: string, depth: number, max: number, all: boolean, out: string[]): void {
     if (depth > max || out.length >= MAX_TREE_ENTRIES) return;
@@ -107,10 +100,7 @@ class ListTreeTool extends SafeTool<z.infer<typeof listTreeArgs>> {
       const abs = path.join(dir, e.name);
       // lstat, never stat: a symlink must not be followed out of the tree.
       const st = fs.lstatSync(abs);
-      const indent = "  ".repeat(depth - 1);
-      const size = st.isDirectory() ? "-" : String(st.size);
-      const when = st.mtime.toISOString().slice(0, 16).replace("T", " ");
-      out.push(`${this.perms(st)} ${size.padStart(9)} ${when} ${indent}${e.name}${e.isDirectory() ? "/" : ""}`);
+      out.push(`${"  ".repeat(depth - 1)}${e.name}${e.isDirectory() ? "/" : ""}`);
       if (e.isDirectory() && !st.isSymbolicLink()) this.walk(abs, depth + 1, max, all, out);
     }
   }
@@ -162,31 +152,6 @@ class SearchCodeTool extends SafeTool<z.infer<typeof searchArgs>> {
       if (e.code === "ENOENT") throw new Error("ripgrep not found — install it with `brew install ripgrep`.");
       throw new Error(e.stderr?.toString().trim() || String(err));
     }
-  }
-}
-
-const webSearchArgs = z.object({
-  query: z.string().describe("What to search the web for"),
-  max_results: z.number().int().min(1).max(10).optional().describe("How many results (default 5)"),
-});
-class WebSearchTool extends SafeTool<z.infer<typeof webSearchArgs>> {
-  name = "web_search";
-  description = "Search the web for current information. Use for docs, releases, and anything after your training cutoff.";
-  schema = webSearchArgs;
-  protected async run({ query, max_results = 5 }: z.infer<typeof webSearchArgs>) {
-    const key = ctx().cfg.tavilyApiKey || process.env.TAVILY_API_KEY;
-    if (!key) throw new Error(`Web search unavailable: set TAVILY_API_KEY, or "tavilyApiKey" in ${CONFIG_PATH}.`);
-    const res = await fetch("https://api.tavily.com/search", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ api_key: key, query, max_results, search_depth: "basic" }),
-    });
-    if (!res.ok) throw new Error(`Tavily returned ${res.status}: ${(await res.text()).slice(0, 200)}`);
-    const json = (await res.json()) as { answer?: string; results?: { title: string; url: string; content: string }[] };
-    const results = json.results ?? [];
-    if (!results.length) return "No results.";
-    const head = json.answer ? `${json.answer}\n\n` : "";
-    return cap(head + results.map((r) => `## ${r.title}\n${r.url}\n${r.content}`).join("\n\n"));
   }
 }
 
@@ -273,21 +238,14 @@ class DeleteFileTool extends SafeTool<z.infer<typeof deleteFileArgs>> {
 
 const askUserArgs = z.object({
   question: z.string().describe("The question, phrased so it can be answered directly"),
-  options: z
-    .array(z.object({ label: z.string(), description: z.string() }))
-    .min(2)
-    .max(6)
-    .optional()
-    .describe("Multiple-choice options, each a short label plus what choosing it means"),
-  multi_select: z.boolean().optional().describe("Whether several options may be chosen"),
 });
 class AskUserTool extends SafeTool<z.infer<typeof askUserArgs>> {
   name = "ask_user";
   description =
-    "Ask the user a question, optionally as multiple choice, when their answer would change what you build. This ends your turn: the question is written to the transcript and the user answers by re-invoking. Use it for genuine forks, not for things you can decide yourself.";
+    "Ask the user a question when their answer would change what you build. This ends your turn: the question is written to the transcript and the user answers by re-invoking. Use it for genuine forks, not for things you can decide yourself.";
   schema = askUserArgs;
-  protected async run({ question, options = [], multi_select = false }: z.infer<typeof askUserArgs>) {
-    ctx().session.pendingQuestion = { question, options, multiSelect: multi_select };
+  protected async run({ question }: z.infer<typeof askUserArgs>) {
+    ctx().session.pendingQuestion = { question };
     return this.halt(`Asked the user: ${question}`);
   }
 }
@@ -425,7 +383,6 @@ export const TOOLS = [
   ReadFileTool,
   ListTreeTool,
   SearchCodeTool,
-  WebSearchTool,
   WriteFileTool,
   EditFileTool,
   DeleteFileTool,

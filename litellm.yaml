@@ -1,0 +1,57 @@
+# LiteLLM proxy config for barebones-agent.
+#
+# Copy to ~/.barebones-agent/litellm.yaml and fill in the placeholders. Every routing,
+# credential and caching decision lives here rather than in the agent — `bba` only ever
+# names a `model_name` from this list.
+#
+# Reload after editing:  launchctl kickstart -k gui/$(id -u)/com.barebones-agent.litellm
+
+model_list:
+  # --- Vertex AI -----------------------------------------------------------------
+  # Auth is Application Default Credentials, so there is no key to pass: run
+  # `gcloud auth application-default login` once and LiteLLM picks up the file at
+  # ~/.config/gcloud/application_default_credentials.json. That works under launchd,
+  # which a `gcloud auth print-access-token` subprocess would not reliably do.
+  - model_name: vertex-claude
+    litellm_params:
+      model: vertex_ai/claude-sonnet-4-5@20250929
+      vertex_project: "REPLACE_WITH_GCP_PROJECT"
+      vertex_location: us-east5
+      # Anthropic's cache is a prefix match over tools -> system -> messages, so these
+      # two breakpoints cover the whole stable prefix. Injected here rather than sent by
+      # the agent: the OpenAI wire format has no top-level cache_control, and the
+      # per-message form needs structured content blocks the agent does not produce.
+      cache_control_injection_points:
+        - { location: message, role: system }
+        - { location: tool_config }
+
+  # --- DeepSeek ------------------------------------------------------------------
+  # No injection block: DeepSeek populates its cache as a side effect of a normal
+  # request, bills nothing to write, and has no opt-in parameter to set.
+  - model_name: deepseek
+    litellm_params:
+      model: deepseek/deepseek-chat
+      api_key: os.environ/DEEPSEEK_API_KEY
+
+  - model_name: deepseek-reasoner
+    litellm_params:
+      model: deepseek/deepseek-reasoner
+      api_key: os.environ/DEEPSEEK_API_KEY
+
+  # --- Anthropic, first-party ----------------------------------------------------
+  - model_name: claude
+    litellm_params:
+      model: anthropic/claude-sonnet-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+      cache_control_injection_points:
+        - { location: message, role: system }
+        - { location: tool_config }
+
+litellm_settings:
+  # The agent sends max_tokens on every request; drop anything an upstream rejects
+  # rather than failing the turn.
+  drop_params: true
+
+general_settings:
+  # Uncomment to require a key, and set apiKeyEnv in the agent's config to match.
+  # master_key: os.environ/LITELLM_MASTER_KEY

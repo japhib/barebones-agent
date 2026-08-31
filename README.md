@@ -13,14 +13,15 @@ self-contained `dist/agent.js`.
 ## Setup
 
 ```sh
-brew install ripgrep          # required
-brew install glow             # optional, for rendered output
+brew install ripgrep              # required
+brew install glow                 # optional, for rendered output
+uv tool install 'litellm[proxy]'  # required — the agent talks to nothing else
 npm install && npm run build
-export ANTHROPIC_API_KEY=...
-export TAVILY_API_KEY=...     # optional, enables web_search
 ```
 
-Anthropic is the default; DeepSeek and Vertex AI work too — see [Providers](#providers).
+Every model reaches the agent through a local [LiteLLM](https://docs.litellm.ai/) proxy,
+so there are no API keys here and no provider code in this repo — see
+[The proxy](#the-proxy).
 
 Optionally `npm link` to get `bba` on your PATH; otherwise call `node dist/agent.js`.
 
@@ -44,19 +45,17 @@ Every run prints the exact command to continue:
 | Flag | |
 |---|---|
 | `--plan` / `--act` | Switch mode; persists in the session |
-| `--provider <name>` | `anthropic` (default), `deepseek` or `vertex`; pinned to the session |
+| `--model <alias>` | A `model_name` from the proxy's `model_list`; sticks to the session |
 | `--approve` | Run the pending shell command once (non-interactive fallback) |
 | `--always-approve` | Run it, and never ask for that exact command again |
 | `--decline [reason]` | Refuse it; with no reason, hands control back to you |
-| `--compact` | Compact the history now |
 | `--timeout <s>` | Per-request limit for the model API (default 600s) |
 | `--bash-timeout <s>` | Limit for a single `run_bash` command (default 120s) |
-| `--quiet` | No progress output |
-| `--usage` | Report the session's token spend and exit |
+| `--quiet` | No progress output, including the per-turn token line |
+| `--usage` | Report the session's token usage and exit |
 | `-l` / `--sessions` | List the sessions saved in this directory, newest first, each with the command to resume it |
 | `Ctrl-C` | Stop the turn and save it; twice cuts a request in flight |
-| `--model <id>` | Override the model for this session; otherwise `models[provider]` from the config |
-| `--editor <cmd>` `--compact-at <n>` `--verbose` `--help` | |
+| `--editor <cmd>` `--verbose` `--help` | |
 
 ### Finding an old session
 
@@ -216,7 +215,7 @@ So the plan → build handoff is one word typed where you are already reading.
 
 | Tool | Approval |
 |---|---|
-| `read_file`, `list_tree`, `search_code`, `web_search` | automatic |
+| `read_file`, `list_tree`, `search_code` | automatic |
 | `write_file`, `edit_file`, `delete_file` | automatic (act mode only); the first two show what changed |
 | `ask_user` | ends the turn; you answer by re-invoking |
 | `run_bash` | **always** requires your explicit approval |
@@ -225,15 +224,17 @@ Every path is confined to the current directory; anything resolving outside it, 
 inside `.git/` or the session directory, is refused. (The agent reading its own
 transcript mid-turn wastes context and muddles the history it is building.)
 
-`ask_user` writes a checkbox list into the transcript. Tick one and re-run:
+`ask_user` writes the question into the transcript and ends the turn. Answer it under
+the `## You` heading below and re-run:
 
 ```markdown
 ## Agent asks
 
 **Which auth approach?**
 
-- [x] **Session cookies** — simplest, server-side state
-- [ ] **JWT** — stateless, harder to revoke
+## You
+
+Session cookies — this is a single server and I want easy revocation.
 ```
 
 `run_bash` never runs anything without you saying so. On a terminal it asks inline and
@@ -256,76 +257,63 @@ With no terminal to ask on — piped stdin, a cron job, CI — it falls back to 
 transcript flow instead of hanging: the request is written out and the turn ends, to be
 answered with `--approve`, `--always-approve` or `--decline [reason]` on the next run.
 
-## Providers
+## The proxy
 
-Set the default in config, or pass `--provider` to start a session on another one. Each
-provider carries its own model under `models`, so switching provider picks up that
-provider's model rather than sending a Claude id to DeepSeek's API. The
-provider is **pinned to the session**: a history is written in one API's dialect, with
-its tool-call ids and message shapes, so `--provider` on a resume is refused rather than
-silently reinterpreted. Sessions written before providers existed resume as `anthropic`.
+The agent speaks one dialect to one endpoint: an OpenAI-compatible `/v1/chat/completions`
+on `127.0.0.1:4000`. A LiteLLM proxy sits there and fans out to Vertex, DeepSeek,
+Anthropic or anything else it supports.
 
-| | Credential | Default model | Notes |
-|---|---|---|---|
-| `anthropic` | `ANTHROPIC_API_KEY` | `claude-opus-5` | Prompt caching, full usage breakdown |
-| `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-v4-pro` | No cache reporting — see below |
-| `vertex` | `gcloud`, or `VERTEX_ACCESS_TOKEN` | `claude-sonnet-4-5@20250929` | Claude on GCP; caching works |
-
-`bba -l` and the run banner label anything other than Anthropic as `provider:model`.
-
-### DeepSeek
+That is the whole provider story. There is no provider table, no `--provider` flag, no
+per-provider model map, and no hand-written client. `--model` names a `model_name` from
+the proxy's `model_list`, and everything behind that alias — which upstream, which
+credentials, which region, which caching — is the proxy's business:
 
 ```sh
-export DEEPSEEK_API_KEY=...
-bba --provider deepseek "explain what this project does"
+bba --model vertex-claude "..."      # -> vertex_ai/claude-sonnet-4-5
+bba --model deepseek "..."           # -> deepseek/deepseek-chat
 ```
 
-NodeLLM ships a DeepSeek client, so this is ordinary plumbing. Two things differ from
-Anthropic. `cache_control` is not sent: every NodeLLM provider spreads unrecognised
-request keys straight into the JSON body, so on an OpenAI-shaped API it would arrive as
-an unknown top-level field rather than being ignored. DeepSeek caches automatically
-anyway, and charges nothing to write.
+Adding a backend means editing YAML, not TypeScript.
 
-The cache accounting is the real gap. DeepSeek's API returns `prompt_cache_hit_tokens`,
-but NodeLLM's client discards it before this agent sees it, so every token arrives
-looking uncached. Rather than print a `0% cached` that describes the missing data instead
-of the run, usage for such a provider drops the breakdown and marks the cost as a
-ceiling:
+### Setting it up
 
-```
-turn     in 1,200  out 15  ·  1 request  ·  up to $0.0003
-```
-
-The real bill is lower by whatever fraction was served from cache.
-
-### Vertex AI
+Copy both templates out of this repo and fill in the placeholders:
 
 ```sh
-gcloud auth application-default login
-bba --provider vertex --model claude-sonnet-4-5@20250929 "..."
+mkdir -p ~/.barebones-agent
+cp litellm.yaml ~/.barebones-agent/litellm.yaml     # then set your GCP project
+gcloud auth application-default login                # Vertex auth, once
+
+sed -e "s|__HOME__|$HOME|g" -e "s|__LITELLM__|$(command -v litellm)|g" \
+  com.barebones-agent.litellm.plist \
+  > ~/Library/LaunchAgents/com.barebones-agent.litellm.plist
+chmod 600 ~/Library/LaunchAgents/com.barebones-agent.litellm.plist   # it holds keys
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.barebones-agent.litellm.plist
 ```
 
-Needs a project: `vertexProject` in the config, or `VERTEX_PROJECT` in the environment.
-`vertexRegion` defaults to `us-east5`; `global` is understood and drops the host prefix.
-Model ids carry Vertex's `@version` suffix and there are no floating aliases, so
-`--model` wants the full id.
+`launchd` starts the proxy at login and restarts it if it dies (`RunAtLoad` +
+`KeepAlive`), so it outlives any single `bba` invocation. The agent contains **no**
+process management — no spawning, no health polling, no PID files. It makes a request,
+and says what to run if nothing answers.
 
-Credentials are an OAuth token, not a static key. One is minted per run with
-`gcloud auth print-access-token`, or taken from `VERTEX_ACCESS_TOKEN` /
-`GOOGLE_ACCESS_TOKEN` if set. Tokens last about an hour, which for a long-lived process
-would mean refresh logic — but this agent is one turn per invocation, so a fresh token
-per run costs one subprocess and removes the problem.
+Two things launchd does not give you, which is why the templates look the way they do:
 
-This is the one provider written here rather than by NodeLLM (`src/vertex.ts`), because
-none of NodeLLM's knobs can reach Vertex: its Anthropic client posts to
-`${baseUrl}/messages` with the model in the JSON body and the key in an `x-api-key`
-header, while Vertex puts the model in the URL, wants `anthropic_version` in the body,
-and authenticates with a bearer token. It is passed to `createLLM({ provider })` as an
-instance. Only the shapes this agent actually sends are converted — text, `tool_use`,
-`tool_result` — because no tool here produces an image or a PDF.
+- **It does not inherit your shell `PATH`**, so `ProgramArguments` needs litellm's
+  absolute path (`command -v litellm`, substituted above).
+- **It does not inherit your exported API keys**, so `DEEPSEEK_API_KEY` and friends live
+  in the plist's `EnvironmentVariables` rather than in your shell profile. Vertex is the
+  exception: it authenticates through the Application Default Credentials file that
+  `gcloud auth application-default login` writes, which launchd can read.
 
-`cache_control` works exactly as on the first-party API, and the usage fields come back
-in the same three categories, so caching and cost reporting are unchanged.
+### Operating it
+
+```sh
+launchctl kickstart -k gui/$(id -u)/com.barebones-agent.litellm   # restart, e.g. after editing the YAML
+launchctl print gui/$(id -u)/com.barebones-agent.litellm          # is it running?
+launchctl bootout gui/$(id -u)/com.barebones-agent.litellm        # stop it
+curl -s localhost:4000/health/liveliness                          # unauthenticated probe
+tail -f ~/.barebones-agent/litellm.log
+```
 
 ## Configuration
 
@@ -334,49 +322,25 @@ CLI flag → environment → config file → default.
 
 ```json
 {
-  "provider": "anthropic",
-  "models": {
-    "anthropic": "claude-opus-5",
-    "deepseek": "deepseek-v4-pro",
-    "vertex": "claude-sonnet-4-5@20250929"
-  },
-  "summaryModel": null,
-  "vertexProject": null,
-  "vertexRegion": "us-east5",
+  "model": "deepseek",
+  "baseUrl": "http://127.0.0.1:4000/v1",
+  "apiKeyEnv": "LITELLM_MASTER_KEY",
   "editor": ["code", "--wait"],
   "renderer": "auto",
   "sessionDir": ".agent",
-  "compactAt": 0,
   "alwaysApprove": [],
-  "tavilyApiKey": null,
   "requestTimeoutMs": 600000,
-  "bashTimeoutMs": 120000,
-  "pricing": {
-    "anthropic/claude-opus-5": { "input": 5, "output": 25, "cacheRead": 0.5, "cacheWrite": 10 }
-  }
+  "bashTimeoutMs": 120000
 }
 ```
 
-`models` is the model each provider runs, and merges per provider over the built-in
-defaults — naming one leaves the rest alone. A model id only means anything to the API it
-belongs to, so there is no single global id: `--provider deepseek` reads `models.deepseek`
-and nothing else. A provider you leave out falls back to its default from the table above,
-and `--model` beats both. The older single `"model"` key is still honoured, as the entry
-for whatever `provider` that config selects.
+`model` is a `model_name` from the proxy's `model_list`, not a provider's own model id.
+`--model` beats it for one run and sticks to that session.
 
-`pricing` is US dollars per million tokens and merges per model over the built-in table,
-so overriding one model keeps the rest. `cacheWrite` is the **1h-TTL** rate (2× input),
-which is what this agent always writes at, and both cache rates are optional — leave them
-out for a provider that does not bill those separately and the input rate is used.
-
-Keys are `provider/model`, so two providers serving a model of the same name keep
-separate rates. A bare `"claude-opus-5"` still works and applies to every provider, which
-is what configs written before providers existed contain. Vertex's `@version` suffix is
-stripped before the lookup, so `claude-sonnet-4-5@20250929` finds the
-`vertex/claude-sonnet-4-5` rate.
-
-`summaryModel` overrides the cheap model used for compaction summaries; `null` takes the
-provider's default.
+`baseUrl` is where the proxy is listening, and takes **no trailing slash** — request URLs
+are built by string concatenation, so one would produce `/v1//chat/completions`.
+`apiKeyEnv` names the env var holding the proxy's key; if the proxy has no `master_key`
+set, leave it, since nothing reads the value.
 
 `editor` is an argv array, so there is no shell quoting to get wrong. Known GUI editors
 (`code`, `subl`, `zed`, …) get `--wait` appended automatically — without it they return
@@ -394,7 +358,14 @@ makes this affordable rather than absurd. Anthropic's cache is a prefix match ov
 `tools` → `system` → `messages`, held server-side — exiting the process costs nothing, and
 a new invocation with a byte-identical prefix gets a hit.
 
-Two consequences shape the design:
+**The agent sends nothing to arrange this.** The OpenAI wire format has no top-level
+`cache_control`, and its per-message form needs structured content blocks the agent does
+not produce. So the breakpoints are injected by the proxy instead, via
+`cache_control_injection_points` in `litellm.yaml` — one on the system message, one on
+the tool definitions, together covering the whole stable prefix. DeepSeek gets no such
+block: it caches automatically and has no opt-in parameter.
+
+Two consequences still shape the agent's design:
 
 - **The tool list is the same in every mode.** Tools sit at the front of the prefix, so
   withholding one in plan mode would invalidate the entire cache on each switch.
@@ -403,58 +374,50 @@ Two consequences shape the design:
 
 ## Token accounting
 
-`--verbose` reports the turn and the running session total; `bba -s <id> --usage` reports
-the session total without calling the model.
+Every turn ends with what it moved, on stderr next to the resume hint:
 
 ```
-turn     in 5,073 (2,496 cached · 2,573 written · 4 fresh)  out 53  ·  49% cached, 2 requests  ·  $0.0283
-session  in 10,628 (7,707 cached · 2,913 written · 8 fresh)  out 340  ·  73% cached, 4 requests  ·  $0.0561
-         across 2 turns
+turn     in 5,073  out 53  ·  2 requests
+
+act mode · continue with:
+↻  bba -s 7f3a2c91 -e
 ```
 
-Input is split three ways because Anthropic bills it three ways: **cached** reads at 0.1x,
-**written** (stored into the cache) at 2x on the 1h TTL used here, and **fresh** at 1x.
-Anthropic's own `input_tokens` field reports only the fresh remainder, so the totals here
-add all three to give the real input volume.
+`--verbose` adds the running session total under it, and `bba -s <id> --usage` reports
+that total on its own without calling the model. `--quiet` drops the line along with the
+rest of the stderr narration.
+
+An interrupted or failed turn reports too — it still spent the tokens, and its work is
+still saved to the session.
+
+Tokens only — there is no cost estimate, because a price table kept in this repo goes
+stale silently and the provider's own console is authoritative.
+
+`in` is the whole prompt volume, cached or not, taken straight from the proxy's
+`prompt_tokens` — the OpenAI shape already counts cached tokens inside that figure rather
+than in a separate bucket. (Reading it the Anthropic way, where `input_tokens` is the
+uncached remainder and the cache counters are added back, would double-count every cached
+token here.)
+
+Cache **writes** are not visible: LiteLLM reports `cache_creation_input_tokens`, but the
+client only reads `prompt_tokens_details.cached_tokens`. To confirm caching is working,
+read `~/.barebones-agent/litellm.log` rather than this line.
 
 Counts cover **every request in the turn**, not just the last one — a turn with eight tool
 rounds makes nine API calls, and all nine are counted.
 
-If `cached` stays near zero across turns of one session, something is perturbing the
-prefix. A healthy session shows each turn's `written` becoming the next turn's `cached`.
-
-Costs come from the local `pricing` table, accumulate in dollars (so a mid-session
-`--model` switch stays correct), and include the compaction summariser's own call. A
-model with no configured price still reports tokens, and the total is marked `$0.0283+
-(some models unpriced)` rather than quietly counting it as free.
-
-**Rates are a local table and will go stale** — check them against the provider's pricing
-page before trusting a number, and override in config when they change. The DeepSeek
-rates in particular are a seed, not a promise.
-
-## Compaction
-
-Off by default. Set `compactAt` to an input-token threshold, or force it with `--compact`.
-The first user message and the last four turns are kept verbatim; everything between is
-summarised by one cheap call — Haiku on Anthropic and Vertex, `deepseek-chat` on
-DeepSeek, or whatever `summaryModel` names. Cuts always land on a turn boundary, so a tool call is
-never separated from its result.
-
-Compaction rewrites the prefix and therefore throws away the cache, which is why it is
-threshold-triggered rather than run every turn. The transcript always keeps the full
-record — compaction only affects what is sent to the model.
-
 ## Layout
 
 ```
-src/context.ts    shared types, pricing table, path guard, tool context
-src/tools.ts      the nine tools
+src/context.ts    shared types, path guard, tool context
+src/tools.ts      the eight tools
 src/progress.ts   stderr activity display
 src/changes.ts    what an edit changed, painted for the terminal
-src/compact.ts    history compaction
-src/providers.ts  the provider table, and building a client from it
-src/vertex.ts     the Vertex AI provider NodeLLM does not ship
+src/history.ts    repairing a history an interrupted turn left dangling
 src/agent.ts      config, session, transcript, main
+
+litellm.yaml                       proxy routing + cache injection (template)
+com.barebones-agent.litellm.plist  LaunchAgent keeping the proxy alive (template)
 ```
 
 ## Timeouts
@@ -469,34 +432,28 @@ saved to the session first, so nothing already done is lost.
 
 ## Notes
 
-- `@node-llm/core` 1.17.0's model registry does not know `claude-opus-5`. Rather than
-  skip validation (which drops the output ceiling to 8k and logs a warning every run),
-  the agent registers unknown models with `ModelRegistry.save()` before use, taking
-  their rates from the `pricing` config. Any newer model id works the same way. This is
-  a no-op for DeepSeek, whose models — `deepseek-v4-pro` included — the bundled
-  registry does know, and
-  load-bearing for Vertex, which has no entries there at all.
-- Its providers are `anthropic`, `bedrock`, `deepseek`, `gemini`, `mistral`, `ollama`,
-  `openai`, `openrouter` and `xai` — no Vertex, hence `src/vertex.ts`.
-- NodeLLM does not emit `cache_control` itself; unknown params are spread into the
-  request body, which is how top-level auto-caching is reached. That same spread is why
-  it is sent only to Anthropic and Vertex: elsewhere it would be an unknown body field,
-  not an ignored one.
-- Its DeepSeek client maps only `prompt_tokens` and `completion_tokens`, dropping
-  `prompt_cache_hit_tokens`, so no cache breakdown is available on that provider.
+- Everything reaches the model through NodeLLM's stock `openai` client, pointed at the
+  proxy with `openaiApiBase`. The key is spelled `openaiApiBase`, not `baseUrl`, and
+  `openaiApiKey` must be non-empty even when the proxy checks nothing — the client
+  refuses to construct without one, so a placeholder stands in.
+- Model ids here are proxy aliases the bundled registry has never seen, and an unknown id
+  fails NodeLLM's tool-support check outright with *"does not support tool calling"*. The
+  agent registers the alias with `ModelRegistry.save()` before every run. Unconditionally,
+  not on a lookup miss: `ModelRegistry.find()` falls back to a bidirectional prefix match,
+  so an alias could otherwise resolve to some unrelated bundled entry and inherit its
+  limits. (`assumeModelExists` is the wrong lever — it only downgrades the check to a
+  warning logged every run, and leaves the output ceiling at 4k.)
 - Its default agentic loop cap is 5 tool rounds (`maxToolCalls`), raised to 50 here.
-- `chat.totalUsage` omits `cache_creation_tokens`, so usage is summed from the per-message
-  `usage` NodeLLM attaches to history instead.
-- NodeLLM's pricing registry has no `claude-opus-5` entry, so costs are computed from
-  the local `pricing` table rather than from its `usage.cost`.
-- Its `AskOptions.signal` never reaches the wire on Anthropic: the provider spreads
-  unrecognised keys into the request body (the same channel `cache_control` rides), so a
-  signal would be sent as `"signal":{}` and rejected. Cutting a request therefore wraps
-  `globalThis.fetch` for the duration of the model call — see `withCuttableFetch`.
+- `chat.totalUsage` omits some counters, so usage is summed from the per-message `usage`
+  NodeLLM attaches to history instead.
+- The OpenAI provider strips `signal` from the request body and forwards it to `fetch`,
+  so `chat.ask(prompt, { signal })` is enough to cut a request in flight. The Anthropic
+  provider does neither, which is why an earlier version of this agent had to monkey-patch
+  `globalThis.fetch`; going through the proxy deleted that workaround.
 - Its tool loop stops at a `halt()` *after* running the rest of the round, discarding the
-  results it did not reach and leaving those `tool_use` blocks unanswered. Anthropic
+  results it did not reach and leaving those `tool_use` blocks unanswered. Every API
   rejects a history in that shape, so `repairDangling` synthesises the missing results on
   every load and save. This also fixes two failures that predate interrupts: a turn that
   trips `maxToolCalls`, and `ask_user`/`run_bash` halting in a batched round.
-- It also discards Anthropic's `stop_reason`, so a refusal arrives as an empty response.
-  The agent says so rather than writing a blank section.
+- A refusal can arrive as an empty response. The agent says so rather than writing a blank
+  section.

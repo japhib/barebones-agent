@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Keeps the LiteLLM proxy running for barebones-agent.
+
+  Install (substitutes __HOME__ and __LITELLM__ on the way in):
+
+    sed -e "s|__HOME__|$HOME|g" -e "s|__LITELLM__|$(command -v litellm)|g" \
+      com.barebones-agent.litellm.plist \
+      > ~/Library/LaunchAgents/com.barebones-agent.litellm.plist
+    chmod 600 ~/Library/LaunchAgents/com.barebones-agent.litellm.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.barebones-agent.litellm.plist
+
+  ProgramArguments must be an ABSOLUTE path: launchd does not inherit the shell PATH.
+  Neither does it inherit exported API keys, which is why they are listed below rather
+  than left to os.environ from a login shell.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.barebones-agent.litellm</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__LITELLM__</string>
+    <string>--config</string>
+    <string>__HOME__/.barebones-agent/litellm.yaml</string>
+    <string>--port</string>
+    <string>4000</string>
+    <string>--host</string>
+    <string>127.0.0.1</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- launchd starts with a near-empty environment; anything the YAML reads through
+         os.environ has to be declared here. Keep this file chmod 600. Vertex is absent
+         on purpose: it authenticates through the ADC file in ~/.config/gcloud. -->
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin</string>
+    <key>DEEPSEEK_API_KEY</key>
+    <string>REPLACE_ME</string>
+    <key>ANTHROPIC_API_KEY</key>
+    <string>REPLACE_ME</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/.barebones-agent/litellm.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.barebones-agent/litellm.log</string>
+
+  <key>WorkingDirectory</key>
+  <string>__HOME__/.barebones-agent</string>
+</dict>
+</plist>

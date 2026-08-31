@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import test, { describe } from "node:test";
 import type { Message } from "@node-llm/core";
 
-import { mergeConfig, newNarration } from "./agent.js";
-import { DEFAULT_PRICING } from "./context.js";
+import { addUsage, formatUsage, mergeConfig, newNarration, turnUsage } from "./agent.js";
+import { DEFAULT_BASE_URL, DEFAULT_MODEL, zeroUsage } from "./context.js";
 
 /** mergeConfig warns through a callback, so a test can both silence it and assert on it. */
 function merge(raw: Record<string, unknown>): { cfg: ReturnType<typeof mergeConfig>; warnings: string[] } {
@@ -16,81 +16,52 @@ describe("mergeConfig", () => {
   test("an empty file is exactly the defaults", () => {
     const { cfg, warnings } = merge({});
     assert.deepEqual(warnings, []);
-    assert.equal(cfg.provider, "anthropic");
-    assert.equal(cfg.models.anthropic, "claude-opus-5");
-    assert.equal(cfg.models.deepseek, "deepseek-v4-pro");
+    assert.equal(cfg.model, DEFAULT_MODEL);
+    assert.equal(cfg.baseUrl, DEFAULT_BASE_URL);
+    assert.equal(cfg.sessionDir, ".agent");
   });
 
   test("warns about a key nobody recognises, and keeps going", () => {
-    const { cfg, warnings } = merge({ nonsense: 1, provider: "deepseek" });
+    const { cfg, warnings } = merge({ nonsense: 1, model: "vertex-claude" });
     assert.equal(warnings.length, 1);
     assert.match(warnings[0] as string, /unknown config key "nonsense"/);
-    assert.equal(cfg.provider, "deepseek"); // the good key still landed
+    assert.equal(cfg.model, "vertex-claude"); // the good key still landed
     assert.ok(!("nonsense" in cfg));
   });
 
-  test("null leaves a non-nullable key alone but is honoured on a nullable one", () => {
-    const { cfg } = merge({ sessionDir: null, tavilyApiKey: null, summaryModel: null });
+  test("a key nobody recognises includes ones the proxy took over", () => {
+    // provider, models and the Vertex project moved into the LiteLLM YAML. A config
+    // still carrying them should say so rather than look like it is being honoured.
+    const { warnings } = merge({ provider: "vertex", vertexProject: "p", models: {} });
+    assert.equal(warnings.length, 3);
+  });
+
+  test("null leaves a key at its default rather than blanking it", () => {
+    const { cfg } = merge({ sessionDir: null, model: null, baseUrl: null });
     assert.equal(cfg.sessionDir, ".agent");
-    assert.equal(cfg.tavilyApiKey, null);
-    assert.equal(cfg.summaryModel, null);
+    assert.equal(cfg.model, DEFAULT_MODEL);
+    assert.equal(cfg.baseUrl, DEFAULT_BASE_URL);
   });
 
-  test("models merges per provider, so naming one leaves the others at their defaults", () => {
-    const { cfg, warnings } = merge({ models: { deepseek: "deepseek-v4-flash" } });
+  test("an alias this repo has never heard of is kept, not dropped", () => {
+    // The proxy owns the namespace: any model_name in its model_list is valid here.
+    const { cfg, warnings } = merge({ model: "my-local-llama" });
     assert.deepEqual(warnings, []);
-    assert.equal(cfg.models.deepseek, "deepseek-v4-flash");
-    assert.equal(cfg.models.anthropic, "claude-opus-5");
-    assert.equal(cfg.models.vertex, "claude-sonnet-4-5@20250929");
+    assert.equal(cfg.model, "my-local-llama");
   });
 
-  test("a model for a provider the table has never heard of is kept, not dropped", () => {
-    // The map is open: it is how you point at a model before this repo knows the name.
-    const { cfg } = merge({ models: { anthropic: "claude-opus-9" } });
-    assert.equal(cfg.models.anthropic, "claude-opus-9");
+  test("baseUrl and apiKeyEnv are overridable, for a proxy on another port", () => {
+    const { cfg } = merge({ baseUrl: "http://127.0.0.1:8000/v1", apiKeyEnv: "MY_KEY" });
+    assert.equal(cfg.baseUrl, "http://127.0.0.1:8000/v1");
+    assert.equal(cfg.apiKeyEnv, "MY_KEY");
   });
 
-  test("pricing merges per model over the built-in table", () => {
-    const { cfg } = merge({ pricing: { "deepseek/deepseek-v4-pro": { input: 1, output: 2 } } });
-    assert.deepEqual(cfg.models, mergeConfig({}, () => {}).models);
-    assert.deepEqual(cfg.pricing["deepseek/deepseek-v4-pro"], { input: 1, output: 2 });
-    assert.deepEqual(cfg.pricing["anthropic/claude-opus-5"], DEFAULT_PRICING["anthropic/claude-opus-5"]);
-  });
-
-  test("neither map is shared between two merges", () => {
-    // A shallow spread of DEFAULT_CONFIG would alias them, and --always-approve style
-    // in-place edits would then leak from one load to the next.
+  test("alwaysApprove is not shared between two merges", () => {
+    // A shallow spread of DEFAULT_CONFIG would alias it, and --always-approve appends
+    // to this list in place, so the entry would leak from one load to the next.
     const a = mergeConfig({}, () => {});
-    a.models.anthropic = "scribbled-on";
-    a.pricing["anthropic/claude-opus-5"] = { input: 0, output: 0 };
-    const b = mergeConfig({}, () => {});
-    assert.equal(b.models.anthropic, "claude-opus-5");
-    assert.deepEqual(b.pricing["anthropic/claude-opus-5"], DEFAULT_PRICING["anthropic/claude-opus-5"]);
-  });
-
-  describe("the legacy single \"model\" key", () => {
-    test("becomes the entry for whichever provider the config selects", () => {
-      const { cfg, warnings } = merge({ provider: "deepseek", model: "deepseek-reasoner" });
-      assert.deepEqual(warnings, []); // migrated, not reported as junk
-      assert.equal(cfg.models.deepseek, "deepseek-reasoner");
-      assert.equal(cfg.models.anthropic, "claude-opus-5"); // the others are untouched
-    });
-
-    test("defaults to anthropic when the config names no provider", () => {
-      const { cfg } = merge({ model: "claude-sonnet-5" });
-      assert.equal(cfg.models.anthropic, "claude-sonnet-5");
-    });
-
-    test("loses to an explicit models map", () => {
-      const { cfg } = merge({ model: "claude-sonnet-5", models: { anthropic: "claude-opus-5" } });
-      assert.equal(cfg.models.anthropic, "claude-opus-5");
-    });
-
-    test("is ignored when it is not a string", () => {
-      const { cfg, warnings } = merge({ model: 42 });
-      assert.deepEqual(warnings, []);
-      assert.equal(cfg.models.anthropic, "claude-opus-5");
-    });
+    a.alwaysApprove.push("rm -rf /");
+    assert.deepEqual(mergeConfig({}, () => {}).alwaysApprove, []);
   });
 });
 
@@ -138,7 +109,83 @@ describe("newNarration", () => {
   });
 
   test("a mark past the end of a shorter history yields nothing rather than throwing", () => {
-    // Compaction rewrites the history mid-turn and can leave it shorter than the mark.
+    // A history can end up shorter than the mark if it is rewritten mid-turn.
     assert.deepEqual(newNarration([say("assistant", "hi")], 5), { lines: [], next: 1 });
+  });
+});
+
+// ---------------------------------------------------------------- token accounting
+
+/** A history the way NodeLLM leaves it: `usage` hung on each assistant message. */
+const withUsage = (u: Record<string, number>): Message =>
+  ({ role: "assistant", content: "ok", usage: u }) as unknown as Message;
+
+describe("turnUsage", () => {
+  test("counts every request in the turn, not just the last", () => {
+    const u = turnUsage([
+      withUsage({ input_tokens: 100, output_tokens: 10 }),
+      withUsage({ input_tokens: 200, output_tokens: 20 }),
+      withUsage({ input_tokens: 300, output_tokens: 30 }),
+    ]);
+    assert.equal(u.requests, 3);
+    assert.equal(u.input, 600);
+    assert.equal(u.output, 60);
+    assert.equal(u.turns, 1);
+  });
+
+  test("takes input_tokens as the whole prompt, without adding cached tokens to it", () => {
+    // The proxy speaks the OpenAI shape: prompt_tokens already includes anything served
+    // from cache, and cached_tokens is a subset of it. Summing them would report a
+    // 5,073-token prompt as 7,569.
+    const u = turnUsage([
+      withUsage({ input_tokens: 5073, cached_tokens: 2496, output_tokens: 53 }),
+    ]);
+    assert.equal(u.input, 5073);
+    assert.equal(u.output, 53);
+  });
+
+  test("ignores messages carrying no usage, so tool results do not count as requests", () => {
+    const u = turnUsage([
+      { role: "user", content: "go" },
+      withUsage({ input_tokens: 10, output_tokens: 1 }),
+      { role: "tool", tool_call_id: "t1", content: "result" },
+    ]);
+    assert.equal(u.requests, 1);
+    assert.equal(u.input, 10);
+  });
+
+  test("an empty history is a turn that moved nothing", () => {
+    assert.deepEqual(turnUsage([]), { ...zeroUsage(), turns: 1 });
+  });
+});
+
+describe("addUsage", () => {
+  test("sums each counter and accumulates turns", () => {
+    const a = { input: 100, output: 10, requests: 2, turns: 1 };
+    const b = { input: 250, output: 25, requests: 3, turns: 1 };
+    assert.deepEqual(addUsage(a, b), { input: 350, output: 35, requests: 5, turns: 2 });
+  });
+
+  test("leaves both operands alone, so a running total cannot corrupt a turn", () => {
+    const total = zeroUsage();
+    const spent = { input: 5, output: 1, requests: 1, turns: 1 };
+    addUsage(total, spent);
+    assert.deepEqual(total, zeroUsage());
+    assert.equal(spent.input, 5);
+  });
+});
+
+describe("formatUsage", () => {
+  test("reports tokens and request count under the label", () => {
+    const line = formatUsage("turn", { input: 5073, output: 53, requests: 2, turns: 1 });
+    assert.match(line, /^turn\s+in 5,073\s+out 53\s+·\s+2 requests$/);
+  });
+
+  test("thousands are grouped, so a large session stays readable", () => {
+    assert.match(formatUsage("session", { input: 929400, output: 55696, requests: 35, turns: 4 }), /in 929,400/);
+  });
+
+  test("a single request is not pluralised", () => {
+    assert.match(formatUsage("turn", { input: 1, output: 1, requests: 1, turns: 1 }), /1 request$/);
   });
 });

@@ -34,7 +34,6 @@ describe("all tools", () => {
       "read_file",
       "run_bash",
       "search_code",
-      "web_search",
       "write_file",
     ]);
   });
@@ -284,13 +283,9 @@ describe("list_tree", () => {
 describe("ask_user", () => {
   test("records the question on the session and halts", async () => {
     const c = useContext({ session: { mode: "act" } });
-    const result = await tool("ask_user").execute({
-      question: "which auth?",
-      options: [{ label: "jwt", description: "stateless" }],
-    });
+    const result = await tool("ask_user").execute({ question: "which auth?" });
     assert.match(String(result), /Asked the user: which auth\?/);
     assert.equal(c.session.pendingQuestion?.question, "which auth?");
-    assert.deepEqual(c.session.pendingQuestion?.options, [{ label: "jwt", description: "stateless" }]);
   });
 });
 
@@ -324,45 +319,6 @@ describe("search_code", () => {
     assert.match(out, /1 match in 1 file/);
     assert.match(out, /b\.md/);
     assert.doesNotMatch(out, /a\.ts/);
-  });
-});
-
-describe("web_search", () => {
-  test("reports that the API key is missing rather than calling out", async () => {
-    delete process.env.TAVILY_API_KEY;
-    const c = useContext({ session: { mode: "act" } });
-    (c.cfg as { tavilyApiKey: string | null }).tavilyApiKey = null;
-    const out = await tool("web_search").execute({ query: "anything" });
-    assert.match(String(out), /Web search unavailable/);
-  });
-
-  test("posts to Tavily and formats the results", async () => {
-    const c = useContext({ session: { mode: "act" } });
-    (c.cfg as { tavilyApiKey: string | null }).tavilyApiKey = "test-key";
-
-    const original = globalThis.fetch;
-    const seen: { body: Record<string, unknown> | null } = { body: null };
-    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
-      seen.body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-      return new Response(
-        JSON.stringify({
-          answer: "Synthesized answer",
-          results: [{ title: "Hacker News", url: "https://news.ycombinator.com", content: "Top story" }],
-        }),
-        { status: 200 },
-      );
-    }) as unknown as typeof fetch;
-    try {
-      const out = String(await tool("web_search").execute({ query: "node release", max_results: 3 }));
-      assert.equal(seen.body?.api_key, "test-key");
-      assert.equal(seen.body?.query, "node release");
-      assert.equal(seen.body?.max_results, 3);
-      assert.match(out, /Synthesized answer/);
-      assert.match(out, /Hacker News/);
-      assert.match(out, /https:\/\/news\.ycombinator\.com/);
-    } finally {
-      globalThis.fetch = original;
-    }
   });
 });
 
