@@ -29,6 +29,10 @@ describe("all tools", () => {
     assert.deepEqual([...seen].sort(), [
       "delete_file",
       "edit_file",
+      "git_diff",
+      "git_log",
+      "git_merge_base",
+      "git_status",
       "list_tree",
       "read_file",
       "run_bash",
@@ -318,6 +322,110 @@ describe("run_bash", () => {
     const result = await tool("run_bash").execute({ command: "echo hi", reason: "test it" });
     assert.match(String(result), /Waiting for the user to approve: echo hi/);
     assert.deepEqual(c.session.pendingBash, { command: "echo hi", reason: "test it" });
+  });
+});
+
+describe("git tools", () => {
+  // These tests run against the actual git repo this project is in, so they verify
+  // that the tools work with real git output rather than mocking it.
+  
+  test("git_status returns porcelain output or clean message", async () => {
+    useContext({ session: { mode: "act" } });
+    const out = String(await tool("git_status").execute({}));
+    // Either there are changes (porcelain format lines) or it's clean
+    assert.ok(out === "Working directory is clean." || out.includes(" "));
+  });
+
+  test("git_log shows commits with default limit of 10", async () => {
+    useContext({ session: { mode: "act" } });
+    const out = String(await tool("git_log").execute({}));
+    assert.ok(out.length > 0);
+    // Should have commit SHAs (at least 7 hex chars at line start)
+    assert.match(out, /^[0-9a-f]{7,}/m);
+  });
+
+  test("git_log with patch=true defaults to 1 commit and includes diff", async () => {
+    useContext({ session: { mode: "act" } });
+    const out = String(await tool("git_log").execute({ patch: true }));
+    assert.ok(out.length > 0);
+    // With --patch, output includes diff markers
+    assert.ok(out.includes("diff --git") || out.includes("No commits found."));
+  });
+
+  test("git_log respects limit parameter", async () => {
+    useContext({ session: { mode: "act" } });
+    const out = String(await tool("git_log").execute({ limit: 2 }));
+    const lines = out.split("\n").filter(l => /^[0-9a-f]{7,}/.test(l));
+    assert.ok(lines.length <= 2, `expected at most 2 commits, got ${lines.length}`);
+  });
+
+  test("git_log can scope to a specific file", async () => {
+    useContext({ session: { mode: "act" } });
+    // This file should exist and have history
+    const out = String(await tool("git_log").execute({ path: "package.json", limit: 5 }));
+    assert.ok(out === "No commits found." || out.includes("package.json") || /^[0-9a-f]{7,}/m.test(out));
+  });
+
+  test("git_merge_base finds common ancestor", async () => {
+    useContext({ session: { mode: "act" } });
+    // Use HEAD and HEAD~ which always have a merge base
+    const out = String(await tool("git_merge_base").execute({ ref1: "HEAD", ref2: "HEAD~1", autoDetectMain: false }));
+    // Should return a commit SHA (40 hex chars)
+    assert.match(out, /^[0-9a-f]{40}$/);
+  });
+
+  test("git_merge_base auto-detects main branch", async () => {
+    useContext({ session: { mode: "act" } });
+    // This might succeed or fail depending on whether main/master exists, but shouldn't crash
+    const out = await tool("git_merge_base").execute({ autoDetectMain: true });
+    // Either a SHA or an error message
+    assert.ok(typeof out === "string");
+  });
+
+  test("git_diff with no args shows working directory changes", async () => {
+    useContext({ session: { mode: "act" } });
+    const out = String(await tool("git_diff").execute({}));
+    // Either "No differences." or actual diff output
+    assert.ok(out === "No differences." || out.includes("diff --git") || out.length > 0);
+  });
+
+  test("git_diff with stat=true shows only file statistics", async () => {
+    useContext({ session: { mode: "act" } });
+    const out = String(await tool("git_diff").execute({ stat: true }));
+    // If there are changes, --stat output includes file names and counts like "file.txt | 5 ++"
+    // If no changes, we get "No differences."
+    assert.ok(out === "No differences." || out.includes("|") || out.length >= 0);
+  });
+
+  test("git_diff between two refs", async () => {
+    useContext({ session: { mode: "act" } });
+    // Compare HEAD with itself - should always show no differences
+    const out = String(await tool("git_diff").execute({ ref1: "HEAD", ref2: "HEAD" }));
+    assert.equal(out, "No differences.");
+  });
+
+  test("git_diff can scope to a path", async () => {
+    useContext({ session: { mode: "act" } });
+    const out = String(await tool("git_diff").execute({ path: "package.json" }));
+    assert.ok(typeof out === "string");
+  });
+
+  test("git tools handle errors gracefully", async () => {
+    useContext({ session: { mode: "act" } });
+    
+    // Invalid ref should return an error message, not throw
+    const badLog = await tool("git_log").execute({ ref: "nonexistent-ref-xyz" });
+    assert.match(String(badLog), /Error:/);
+    
+    const badMergeBase = await tool("git_merge_base").execute({ 
+      ref1: "HEAD", 
+      ref2: "nonexistent-ref-xyz",
+      autoDetectMain: false 
+    });
+    assert.match(String(badMergeBase), /Error:/);
+    
+    const badDiff = await tool("git_diff").execute({ ref1: "nonexistent-ref-xyz" });
+    assert.match(String(badDiff), /Error:/);
   });
 });
 

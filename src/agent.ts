@@ -442,22 +442,24 @@ export function interruptedMessage(n: number): string {
 
 // ---------------------------------------------------------------- prompt
 
-/** Byte-stable on purpose: this sits inside the cached prefix, so anything
- *  volatile here (a date, the cwd, the mode) would cost a cache hit every turn. */
+// SYSTEM_PROMPT is in the cached prefix of input to the model, so anything
+// volatile here (a date, the cwd, the mode) would cost a cache hit every turn.
 const SYSTEM_PROMPT = `You are a coding agent working inside a single project directory.
 
-You work in one turn per invocation. There is no interactive prompt: when you need the
-user, call ask_user, and your turn ends until they answer.
+You work in one turn per invocation. There is no interactive prompt: when you need
+clarification or input from the user, just stop and explain what you need. Your turn will
+end and they can respond in the next invocation.
 
 Tools:
-- list_tree, read_file and search_code run immediately and cost the user nothing. Use
-  them freely, and prefer them over guessing.
+- list_tree, read_file, search_code, and the git_* tools run immediately and cost the user
+  nothing. Use them freely, and prefer them over guessing.
 - write_file, edit_file and delete_file modify the project. They are refused while the
   session is in plan mode.
 - run_bash ALWAYS stops the session and asks the user to approve the command before it
   runs. That costs them a round trip, so reach for it only when no other tool can do the
-  job: running tests, git, package managers, build steps. Never use it to read, search
-  or list files.
+  job: running tests, package managers, build steps. Never use it to read, search
+  or list files — use the read-only tools instead, including git_* tools for repository
+  information.
 
 When several tool calls do not depend on each other — three files to read, a read and a
 search, two directories to list — make them all in one message rather than one per turn.
@@ -861,6 +863,7 @@ async function main(): Promise<void> {
   if (!prompt && values.edit) {
     ensurePromptStub(cfg, session);
     const [cmd, ...args] = resolveEditor(values.editor, cfg);
+    console.log(dim('Opening editor for user input ...'));
     const r = spawnSync(cmd as string, [...args, mdPath(cfg, session.id)], { stdio: "inherit" });
     if (r.error) die(`Could not launch editor "${cmd}": ${r.error.message}`);
   }

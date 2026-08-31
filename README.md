@@ -216,26 +216,40 @@ So the plan → build handoff is one word typed where you are already reading.
 | Tool | Approval |
 |---|---|
 | `read_file`, `list_tree`, `search_code` | automatic |
+| `git_status`, `git_log`, `git_merge_base`, `git_diff` | automatic |
 | `write_file`, `edit_file`, `delete_file` | automatic (act mode only); the first two show what changed |
-| `ask_user` | ends the turn; you answer by re-invoking |
 | `run_bash` | **always** requires your explicit approval |
 
 Every path is confined to the current directory; anything resolving outside it, or
 inside `.git/` or the session directory, is refused. (The agent reading its own
 transcript mid-turn wastes context and muddles the history it is building.)
 
-`ask_user` writes the question into the transcript and ends the turn. Answer it under
-the `## You` heading below and re-run:
+### Git tools
 
-```markdown
-## Agent asks
+The agent has direct access to git information without needing `run_bash`:
 
-**Which auth approach?**
+- **`git_status`** — working directory status (modified, staged, untracked files)
+- **`git_log`** — commit history with optional diffs
+  - `limit`: number of commits (default 10, or 1 if `patch=true`)
+  - `patch`: include full diffs for each commit
+  - `path`: scope to specific file/directory
+  - `ref`: show log for a specific branch/ref
+- **`git_merge_base`** — find common ancestor between refs
+  - Auto-detects main branch (tries `origin/main`, `origin/master`, `main`, `master`)
+  - Useful for finding where a branch diverged
+- **`git_diff`** — show differences between refs or working directory
+  - `ref1`, `ref2`: compare any two commits/branches
+  - `path`: scope to specific file/directory
+  - `stat`: show only file statistics instead of full diff
+  - `cached`: show staged changes
 
-## You
-
-Session cookies — this is a single server and I want easy revocation.
+**Typical workflow** to see changes in current branch vs main:
 ```
+1. git_merge_base(ref2="origin/main") → returns merge-base SHA
+2. git_diff(ref1="<that-sha>", ref2="HEAD") → shows all changes
+```
+
+Or compare branches directly: `git_diff(ref1="origin/main", ref2="HEAD")`.
 
 `run_bash` never runs anything without you saying so. On a terminal it asks inline and
 waits for a single keypress, without ending the turn:
@@ -473,6 +487,6 @@ saved to the session first, so nothing already done is lost.
   results it did not reach and leaving those `tool_use` blocks unanswered. Every API
   rejects a history in that shape, so `repairDangling` synthesises the missing results on
   every load and save. This also fixes two failures that predate interrupts: a turn that
-  trips `maxToolCalls`, and `ask_user`/`run_bash` halting in a batched round.
+  trips `maxToolCalls`, and `run_bash` halting in a batched round.
 - A refusal can arrive as an empty response. The agent says so rather than writing a blank
   section.

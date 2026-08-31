@@ -365,6 +365,121 @@ class RunBashTool extends SafeTool<z.infer<typeof runBashArgs>> {
   }
 }
 
+const gitStatusArgs = z.object({});
+class GitStatusTool extends SafeTool<z.infer<typeof gitStatusArgs>> {
+  name = "git_status";
+  description = "Show the working directory status: modified, staged, and untracked files.";
+  schema = gitStatusArgs;
+  protected async run(_args: z.infer<typeof gitStatusArgs>) {
+    try {
+      const out = execFileSync("git", ["status", "--porcelain"], { encoding: "utf8", cwd: CWD });
+      return out.trim() ? cap(out) : "Working directory is clean.";
+    } catch (err) {
+      const e = err as { status?: number; code?: string; stderr?: Buffer };
+      if (e.code === "ENOENT") throw new Error("git not found — ensure git is installed.");
+      throw new Error(e.stderr?.toString().trim() || String(err));
+    }
+  }
+}
+
+const gitLogArgs = z.object({
+  limit: z.number().int().min(1).optional().describe("Number of commits to show (default 10, or 1 if patch is true)"),
+  patch: z.boolean().optional().describe("Include diff for each commit (default false)"),
+  path: z.string().optional().describe("Optional file or directory to scope log to"),
+  ref: z.string().optional().describe("Ref/branch to show log for (default HEAD)"),
+});
+class GitLogTool extends SafeTool<z.infer<typeof gitLogArgs>> {
+  name = "git_log";
+  description = "Show commit history with optional patches. Use patch=true to see what changed in commits.";
+  schema = gitLogArgs;
+  protected async run({ limit, patch = false, path: p, ref }: z.infer<typeof gitLogArgs>) {
+    const defaultLimit = patch ? 1 : 10;
+    const args = ["log", "--oneline"];
+    if (patch) args.push("--patch");
+    args.push("-n", String(limit ?? defaultLimit));
+    if (ref) args.push(ref);
+    if (p) args.push("--", p);
+    try {
+      const out = execFileSync("git", args, { encoding: "utf8", cwd: CWD, maxBuffer: 16 * 1024 * 1024 });
+      return out.trim() ? cap(out) : "No commits found.";
+    } catch (err) {
+      const e = err as { status?: number; code?: string; stderr?: Buffer };
+      if (e.code === "ENOENT") throw new Error("git not found — ensure git is installed.");
+      throw new Error(e.stderr?.toString().trim() || String(err));
+    }
+  }
+}
+
+const gitMergeBaseArgs = z.object({
+  ref1: z.string().optional().describe("First ref/branch (default HEAD)"),
+  ref2: z.string().optional().describe("Second ref/branch (required unless autoDetectMain is true)"),
+  autoDetectMain: z.boolean().optional().describe("Auto-detect main branch as ref2 (tries origin/main, origin/master, main, master)"),
+});
+class GitMergeBaseTool extends SafeTool<z.infer<typeof gitMergeBaseArgs>> {
+  name = "git_merge_base";
+  description = "Find the common ancestor commit between two refs. Useful for finding where a branch diverged from main.";
+  schema = gitMergeBaseArgs;
+  
+  private detectMainBranch(): string | null {
+    const candidates = ["origin/main", "origin/master", "main", "master"];
+    for (const branch of candidates) {
+      try {
+        execFileSync("git", ["rev-parse", "--verify", branch], { encoding: "utf8", cwd: CWD, stdio: "pipe" });
+        return branch;
+      } catch {
+        continue;
+      }
+    }
+    return null;
+  }
+
+  protected async run({ ref1 = "HEAD", ref2, autoDetectMain = true }: z.infer<typeof gitMergeBaseArgs>) {
+    let target = ref2;
+    if (!target) {
+      if (!autoDetectMain) throw new Error("ref2 is required when autoDetectMain is false.");
+      target = this.detectMainBranch();
+      if (!target) throw new Error("Could not auto-detect main branch. Tried: origin/main, origin/master, main, master.");
+    }
+    try {
+      const out = execFileSync("git", ["merge-base", ref1, target], { encoding: "utf8", cwd: CWD });
+      return out.trim();
+    } catch (err) {
+      const e = err as { status?: number; code?: string; stderr?: Buffer };
+      if (e.code === "ENOENT") throw new Error("git not found — ensure git is installed.");
+      throw new Error(e.stderr?.toString().trim() || String(err));
+    }
+  }
+}
+
+const gitDiffArgs = z.object({
+  ref1: z.string().optional().describe("First ref/branch/commit (omit to compare working directory)"),
+  ref2: z.string().optional().describe("Second ref/branch/commit (default HEAD if ref1 provided)"),
+  path: z.string().optional().describe("Optional file or directory to scope diff to"),
+  stat: z.boolean().optional().describe("Show only file stats instead of full diff (default false)"),
+  cached: z.boolean().optional().describe("Show staged changes (default false)"),
+});
+class GitDiffTool extends SafeTool<z.infer<typeof gitDiffArgs>> {
+  name = "git_diff";
+  description = "Show differences between refs, commits, or working directory. Can compare any two commits/branches or show working directory changes.";
+  schema = gitDiffArgs;
+  protected async run({ ref1, ref2, path: p, stat = false, cached = false }: z.infer<typeof gitDiffArgs>) {
+    const args = ["diff"];
+    if (stat) args.push("--stat");
+    if (cached) args.push("--cached");
+    if (ref1) args.push(ref1);
+    if (ref2) args.push(ref2);
+    if (p) args.push("--", p);
+    try {
+      const out = execFileSync("git", args, { encoding: "utf8", cwd: CWD, maxBuffer: 16 * 1024 * 1024 });
+      return out.trim() ? cap(out) : "No differences.";
+    } catch (err) {
+      const e = err as { status?: number; code?: string; stderr?: Buffer };
+      if (e.code === "ENOENT") throw new Error("git not found — ensure git is installed.");
+      throw new Error(e.stderr?.toString().trim() || String(err));
+    }
+  }
+}
+
 export const TOOLS = [
   ReadFileTool,
   ListTreeTool,
@@ -373,4 +488,8 @@ export const TOOLS = [
   EditFileTool,
   DeleteFileTool,
   RunBashTool,
+  GitStatusTool,
+  GitLogTool,
+  GitMergeBaseTool,
+  GitDiffTool,
 ];
