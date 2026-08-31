@@ -241,6 +241,70 @@ type Approval = "yes" | "always" | "no";
 const APPROVAL_KEYS: Record<string, Approval> = { y: "yes", a: "always", n: "no" };
 
 /**
+ * Characters that are forbidden in suffix arguments because they enable
+ * command injection, file operations, or other dangerous shell behavior.
+ */
+const DANGEROUS_SUFFIX_CHARS = /[$`<>]/;
+
+/**
+ * Check if grep arguments contain the -f flag (reads patterns from file).
+ * Must handle quoted strings to avoid false positives like grep 'rm -rf'.
+ */
+function hasGrepFileFlag(args: string): boolean {
+  let i = 0;
+  while (i < args.length) {
+    // Skip quoted strings
+    const quoted = matchQuotedString(args, i);
+    if (quoted) {
+      i += quoted.length;
+      continue;
+    }
+    // Look for -f or --file flag (possibly combined like -nf, -Ef)
+    if (args[i] === "-") {
+      const flagMatch = args.slice(i).match(/^--?file\b|^-[a-zA-Z]*f\b/);
+      if (flagMatch) return true;
+    }
+    i++;
+  }
+  return false;
+}
+
+/**
+ * Match a quoted string (single or double quotes) that may contain pipes.
+ * Returns the full quoted string including quotes, or null if no match at position.
+ */
+function matchQuotedString(s: string, pos: number): string | null {
+  const quote = s[pos];
+  if (quote !== '"' && quote !== "'") return null;
+  let i = pos + 1;
+  while (i < s.length) {
+    if (s[i] === quote) return s.slice(pos, i + 1);
+    if (s[i] === "\\" && quote === '"') i++; // skip escaped char in double quotes
+    i++;
+  }
+  return null; // unclosed quote
+}
+
+/**
+ * Find the last unquoted pipe in a string, respecting single and double quotes.
+ * Returns the index of the pipe, or -1 if not found.
+ */
+function findLastUnquotedPipe(s: string): number {
+  let lastPipe = -1;
+  let i = 0;
+  while (i < s.length) {
+    const quoted = matchQuotedString(s, i);
+    if (quoted) {
+      i += quoted.length;
+      continue;
+    }
+    if (s[i] === "|") lastPipe = i;
+    i++;
+  }
+  return lastPipe;
+}
+
+/**
  * Strip common shell suffixes that don't change what command is being run:
  * - `2>&1` (stderr redirection)
  * - `| head ...`, `| tail ...`, `| grep ...` (output filtering)
@@ -248,6 +312,10 @@ const APPROVAL_KEYS: Record<string, Approval> = { y: "yes", a: "always", n: "no"
  * Returns the base command (to check against alwaysApprove) and the suffix.
  * Only these specific, safe transformations are recognized — arbitrary pipes
  * like `| wc -l` are left as part of the base command.
+ *
+ * Security: Suffixes containing dangerous characters ($, `, <, >) are rejected
+ * to prevent command substitution and file redirection attacks. The -f flag
+ * is forbidden for grep to prevent reading arbitrary files.
  */
 export function extractBaseCommand(command: string): { base: string; suffix: string } {
   let base = command.trim();
@@ -256,13 +324,33 @@ export function extractBaseCommand(command: string): { base: string; suffix: str
   // Repeatedly strip recognized suffixes from the end.
   // Order matters: we strip from the end, so `cmd 2>&1 | grep x` strips `| grep x` first.
   while (true) {
-    // Match trailing pipe to head/tail/grep with optional arguments
-    const pipeMatch = base.match(/\s+\|\s*(head|tail|grep)(\s+[^|]*)?$/);
-    if (pipeMatch) {
-      suffix = pipeMatch[0] + suffix;
-      base = base.slice(0, -pipeMatch[0].length).trimEnd();
-      continue;
+    // Find the last unquoted pipe to check for head/tail/grep
+    const pipeIdx = findLastUnquotedPipe(base);
+    if (pipeIdx !== -1) {
+      const afterPipe = base.slice(pipeIdx);
+      // Match pipe to head/tail/grep with optional arguments
+      const pipeMatch = afterPipe.match(/^\|\s*(head|tail|grep)(\s+.*)?$/);
+      if (pipeMatch) {
+        const args = pipeMatch[2] || "";
+        const cmd = pipeMatch[1];
+        
+        // Reject suffixes with dangerous characters (command substitution, redirection)
+        if (DANGEROUS_SUFFIX_CHARS.test(args)) break;
+        
+        // Reject grep -f/--file (reads patterns from file)
+        if (cmd === "grep" && hasGrepFileFlag(args)) break;
+        
+        // Include any whitespace before the pipe in the suffix
+        const beforePipe = base.slice(0, pipeIdx);
+        const wsMatch = beforePipe.match(/\s+$/);
+        const ws = wsMatch ? wsMatch[0] : "";
+        
+        suffix = ws + afterPipe + suffix;
+        base = beforePipe.trimEnd();
+        continue;
+      }
     }
+    
     // Match trailing 2>&1
     const redirMatch = base.match(/\s+2>&1$/);
     if (redirMatch) {
