@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test, { after, describe } from "node:test";
 import type { Tool } from "@node-llm/core";
 
-import { TOOLS } from "./tools.js";
+import { extractBaseCommand, TOOLS } from "./tools.js";
 import { Progress } from "./progress.js";
 import { captureStderr, cleanTmp, tmpDir, useContext, writeTmp } from "./test-helpers.js";
 
@@ -316,12 +316,122 @@ describe("search_code", () => {
   });
 });
 
+describe("extractBaseCommand", () => {
+  test("returns the full command unchanged if no recognized suffix", () => {
+    assert.deepEqual(extractBaseCommand("npm test"), { base: "npm test", suffix: "" });
+    assert.deepEqual(extractBaseCommand("cat file | wc -l"), { base: "cat file | wc -l", suffix: "" });
+  });
+
+  test("strips trailing 2>&1", () => {
+    assert.deepEqual(extractBaseCommand("npm test 2>&1"), { base: "npm test", suffix: " 2>&1" });
+  });
+
+  test("strips pipe to head", () => {
+    assert.deepEqual(extractBaseCommand("npm test | head -10"), { base: "npm test", suffix: " | head -10" });
+    assert.deepEqual(extractBaseCommand("npm test | head"), { base: "npm test", suffix: " | head" });
+  });
+
+  test("strips pipe to tail", () => {
+    assert.deepEqual(extractBaseCommand("npm test | tail -20"), { base: "npm test", suffix: " | tail -20" });
+    assert.deepEqual(extractBaseCommand("npm test | tail -f"), { base: "npm test", suffix: " | tail -f" });
+  });
+
+  test("strips pipe to grep", () => {
+    assert.deepEqual(extractBaseCommand("npm test | grep -n 'error'"), { base: "npm test", suffix: " | grep -n 'error'" });
+    assert.deepEqual(extractBaseCommand("npm test | grep error"), { base: "npm test", suffix: " | grep error" });
+  });
+
+  test("strips chained suffixes in order", () => {
+    // The order is: first strip pipes (from end), then 2>&1
+    assert.deepEqual(
+      extractBaseCommand("npm test 2>&1 | grep foo | head -5"),
+      { base: "npm test", suffix: " 2>&1 | grep foo | head -5" }
+    );
+    assert.deepEqual(
+      extractBaseCommand("npm test | tail -10 | grep error"),
+      { base: "npm test", suffix: " | tail -10 | grep error" }
+    );
+  });
+
+  test("does not strip arbitrary pipes", () => {
+    // Only head/tail/grep are stripped, not other commands
+    assert.deepEqual(extractBaseCommand("cat file | wc -l"), { base: "cat file | wc -l", suffix: "" });
+    assert.deepEqual(extractBaseCommand("npm test | sort"), { base: "npm test | sort", suffix: "" });
+  });
+
+  test("handles whitespace variations", () => {
+    assert.deepEqual(extractBaseCommand("npm test  |  head -5"), { base: "npm test", suffix: "  |  head -5" });
+    assert.deepEqual(extractBaseCommand("npm test   2>&1"), { base: "npm test", suffix: "   2>&1" });
+  });
+});
+
 describe("run_bash", () => {
   test("falls back to the transcript when there is no TTY to ask on", async () => {
     const c = useContext({ session: { mode: "act" } });
     const result = await tool("run_bash").execute({ command: "echo hi", reason: "test it" });
     assert.match(String(result), /Waiting for the user to approve: echo hi/);
     assert.deepEqual(c.session.pendingBash, { command: "echo hi", reason: "test it" });
+  });
+
+  test("auto-approves variations of commands in alwaysApprove list", async () => {
+    // When the base command is in alwaysApprove, variations with suffixes should also be approved
+    const c = useContext({
+      session: { mode: "act" },
+      projectCfg: { alwaysApprove: ["echo hello"] },
+    });
+    
+    // The base command should be auto-approved (no pending)
+    const result = await tool("run_bash").execute({ command: "echo hello | head -1", reason: "test" });
+    // Since there's no TTY, it would normally go to pendingBash, but the base is approved
+    // so it should actually run. Let's check the output format.
+    assert.ok(!String(result).includes("Waiting for the user to approve"));
+    assert.equal(c.session.pendingBash, null);
+  });
+
+  test("workingDirectory runs command in subdirectory", async () => {
+    const dir = tmpDir("run-bash-cwd");
+    writeTmp(`${dir}/test.txt`, "hello from subdir");
+    useContext({
+      session: { mode: "act" },
+      projectCfg: { alwaysApprove: ["cat test.txt"] },
+    });
+    
+    const result = await tool("run_bash").execute({
+      command: "cat test.txt",
+      reason: "read file in subdir",
+      workingDirectory: dir,
+    });
+    assert.match(String(result), /hello from subdir/);
+  });
+
+  test("workingDirectory rejects paths outside project", async () => {
+    useContext({
+      session: { mode: "act" },
+      projectCfg: { alwaysApprove: ["pwd"] },
+    });
+    
+    const result = await tool("run_bash").execute({
+      command: "pwd",
+      reason: "test escape",
+      workingDirectory: "../..",
+    });
+    assert.match(String(result), /resolves outside the current directory/);
+  });
+
+  test("workingDirectory rejects non-directory paths", async () => {
+    const dir = tmpDir("run-bash-notdir");
+    const file = writeTmp(`${dir}/file.txt`, "not a dir");
+    useContext({
+      session: { mode: "act" },
+      projectCfg: { alwaysApprove: ["pwd"] },
+    });
+    
+    const result = await tool("run_bash").execute({
+      command: "pwd",
+      reason: "test file as cwd",
+      workingDirectory: file,
+    });
+    assert.match(String(result), /is not a directory/);
   });
 });
 

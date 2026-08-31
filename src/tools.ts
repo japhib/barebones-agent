@@ -22,6 +22,7 @@ import {
   resolveSafe,
   saveProjectConfig,
 } from "./context.js";
+import { dim } from "./progress.js";
 import { changeStat, describeChange, paintChange, type Change } from "./changes.js";
 
 /** What a tool returns when the user has pressed Ctrl-C. Ending the loop through halt()
@@ -240,6 +241,42 @@ type Approval = "yes" | "always" | "no";
 const APPROVAL_KEYS: Record<string, Approval> = { y: "yes", a: "always", n: "no" };
 
 /**
+ * Strip common shell suffixes that don't change what command is being run:
+ * - `2>&1` (stderr redirection)
+ * - `| head ...`, `| tail ...`, `| grep ...` (output filtering)
+ *
+ * Returns the base command (to check against alwaysApprove) and the suffix.
+ * Only these specific, safe transformations are recognized — arbitrary pipes
+ * like `| wc -l` are left as part of the base command.
+ */
+export function extractBaseCommand(command: string): { base: string; suffix: string } {
+  let base = command.trim();
+  let suffix = "";
+
+  // Repeatedly strip recognized suffixes from the end.
+  // Order matters: we strip from the end, so `cmd 2>&1 | grep x` strips `| grep x` first.
+  while (true) {
+    // Match trailing pipe to head/tail/grep with optional arguments
+    const pipeMatch = base.match(/\s+\|\s*(head|tail|grep)(\s+[^|]*)?$/);
+    if (pipeMatch) {
+      suffix = pipeMatch[0] + suffix;
+      base = base.slice(0, -pipeMatch[0].length).trimEnd();
+      continue;
+    }
+    // Match trailing 2>&1
+    const redirMatch = base.match(/\s+2>&1$/);
+    if (redirMatch) {
+      suffix = redirMatch[0] + suffix;
+      base = base.slice(0, -redirMatch[0].length).trimEnd();
+      continue;
+    }
+    break;
+  }
+
+  return { base, suffix };
+}
+
+/**
  * Read one keypress from the controlling terminal.
  *
  * Raw mode is what makes a single key enough — but it also stops the kernel turning
@@ -283,14 +320,26 @@ function readKey(valid: string[]): Promise<string> {
 }
 
 /** Returns null when there is no terminal to ask on; the caller then falls back to
- *  writing the request into the transcript and ending the turn. */
-async function askApproval(command: string, reason: string): Promise<Approval | null> {
+ *  writing the request into the transcript and ending the turn.
+ *  
+ *  When the command has a recognized suffix (pipes to head/tail/grep, 2>&1), the suffix
+ *  is displayed dimmed to show that approval applies to the base command. */
+async function askApproval(command: string, reason: string, workingDirectory?: string): Promise<Approval | null> {
   if (!process.stdin.isTTY || !process.stderr.isTTY) return null;
   const { progress } = ctx();
   progress.stop();
+  
+  // Show base command in cyan, suffix dimmed — user approves the base
+  const { base, suffix } = extractBaseCommand(command);
+  const displayCmd = suffix
+    ? `\x1b[36m${base}\x1b[0m${dim(suffix)}`
+    : `\x1b[36m${command}\x1b[0m`;
+  const alsoVariations = suffix ? " (and variations)" : "";
+  const inDir = workingDirectory ? `  ${dim(`in ${workingDirectory}/`)}\n` : "";
+  
   process.stderr.write(
-    `\n\x1b[1mrun_bash\x1b[0m wants to run:\n  \x1b[36m${command}\x1b[0m\n  \x1b[2m${reason}\x1b[0m\n` +
-      `  [\x1b[1my\x1b[0m] run once   [\x1b[1ma\x1b[0m] always allow this command   [\x1b[1mn\x1b[0m] decline\n`,
+    `\n\x1b[1mrun_bash\x1b[0m wants to run:\n  ${displayCmd}\n${inDir}  \x1b[2m${reason}\x1b[0m\n` +
+      `  [\x1b[1my\x1b[0m] run once   [\x1b[1ma\x1b[0m] always allow this command${alsoVariations}   [\x1b[1mn\x1b[0m] decline\n`,
   );
   const answer = APPROVAL_KEYS[await readKey(Object.keys(APPROVAL_KEYS))] ?? "no";
   // Ctrl-C here is an interrupt, not a refusal — saying "declined" would tell both the
@@ -310,23 +359,37 @@ async function askApproval(command: string, reason: string): Promise<Approval | 
 const runBashArgs = z.object({
   command: z.string().describe("The exact shell command to run"),
   reason: z.string().describe("Why this command is needed and what you expect it to show"),
+  workingDirectory: z.string().optional().describe("Subdirectory to run the command in (relative to project root). Use this instead of `cd dir &&` prefix."),
 });
 class RunBashTool extends SafeTool<z.infer<typeof runBashArgs>> {
   name = "run_bash";
   description =
-    "Run a shell command in the current directory. This ALWAYS requires the user to approve it first, which ends your turn and costs them a round trip. Every other tool runs immediately without asking. Use this only for what no other tool can do: running tests, git, package managers, build steps.";
+    "Run a shell command in the current directory. This ALWAYS requires the user to approve it first, which ends your turn and costs them a round trip. Every other tool runs immediately without asking. Use this only for what no other tool can do: running tests, package managers, build steps. Never use it to read, search or list files — use the read-only tools instead, including git_* tools for repository information. Some commands may be pre-approved for this project; you can add | head, | tail, | grep, or 2>&1 to any approved command and it will also be approved. Use workingDirectory to run in a subdirectory instead of `cd subdir &&` patterns.";
   schema = runBashArgs;
-  protected async run({ command, reason }: z.infer<typeof runBashArgs>) {
+  protected async run({ command, reason, workingDirectory }: z.infer<typeof runBashArgs>) {
     this.requireAct();
     const { cfg, projectCfg, session } = ctx();
-    const once = session.approvedOnce.indexOf(command);
+    
+    // Resolve and validate working directory if provided
+    let cwd = CWD;
+    if (workingDirectory) {
+      cwd = resolveSafe(workingDirectory);
+      if (!fs.statSync(cwd).isDirectory()) {
+        throw new Error(`workingDirectory "${workingDirectory}" is not a directory.`);
+      }
+    }
+    
+    // Extract base command for approval matching. Variations like `npm test 2>&1 | head`
+    // are auto-approved if the base (`npm test`) is in the list.
+    const { base } = extractBaseCommand(command);
+    const onceIdx = session.approvedOnce.indexOf(base);
 
-    if (projectCfg.alwaysApprove.includes(command)) {
-      // already blanket-approved
-    } else if (once !== -1) {
-      session.approvedOnce.splice(once, 1); // a one-shot approval is spent
+    if (projectCfg.alwaysApprove.includes(base)) {
+      // already blanket-approved (base command matches)
+    } else if (onceIdx !== -1) {
+      session.approvedOnce.splice(onceIdx, 1); // a one-shot approval is spent
     } else {
-      const answer = await askApproval(command, reason);
+      const answer = await askApproval(command, reason, workingDirectory);
       if (ctx().interrupt.requested) return this.halt(INTERRUPT_HALT);
       if (answer === null) {
         // Nothing to prompt on, so fall back to asking through the transcript.
@@ -338,13 +401,14 @@ class RunBashTool extends SafeTool<z.infer<typeof runBashArgs>> {
         return this.halt(`The user declined to run \`${command}\`.`);
       }
       if (answer === "always") {
-        projectCfg.alwaysApprove.push(command);
+        // Save the base command, not the full command with suffixes
+        projectCfg.alwaysApprove.push(base);
         saveProjectConfig(cfg, projectCfg);
       }
     }
     const limit = cfg.bashTimeoutMs;
     const r = spawnSync("bash", ["-lc", command], {
-      cwd: CWD,
+      cwd,
       encoding: "utf8",
       timeout: limit,
       maxBuffer: 8 * 1024 * 1024,

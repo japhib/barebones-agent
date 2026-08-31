@@ -16,7 +16,7 @@ import { parseArgs } from "node:util";
 
 import { repairDangling } from "./history.js";
 import { Progress, dim } from "./progress.js";
-import { INTERRUPT_HALT, TOOLS } from "./tools.js";
+import { extractBaseCommand, INTERRUPT_HALT, TOOLS } from "./tools.js";
 import {
   APP_DIR,
   CONFIG_PATH,
@@ -205,6 +205,7 @@ export function readProjectContext(contextFile?: string): string | null {
       if (content.length > MAX_PROJECT_CONTEXT) {
         content = `${content.slice(0, MAX_PROJECT_CONTEXT)}\n\n[truncated ${content.length - MAX_PROJECT_CONTEXT} characters]`;
       }
+      console.log(dim(`Reading project context file: ${name}`))
       return `[project context from ${name}]\n${content}\n[/project context]`;
     } catch {
       // Permission error, binary file, etc. — try next.
@@ -798,10 +799,25 @@ async function main(): Promise<void> {
   const projectCfg = loadProjectConfig(cfg);
   // Inject project context at the start of new sessions.
   // Uses contextFile from project config if set, else AGENTS.md / CLAUDE.md / README.md.
+  // Also includes pre-approved commands so the LLM knows to prefer them.
   if (isNewSession) {
+    const parts: string[] = [];
     const projectContext = readProjectContext(projectCfg.contextFile);
-    if (projectContext) {
-      session.messages.push({ role: "user", content: projectContext });
+    if (projectContext) parts.push(projectContext);
+    
+    // Tell the LLM about pre-approved commands (part of cached prefix, not updated later)
+    if (projectCfg.alwaysApprove.length > 0) {
+      parts.push(
+        `[pre-approved run_bash commands]\n` +
+        `The following commands are already approved and will run without asking:\n` +
+        projectCfg.alwaysApprove.map(cmd => `  ${cmd}`).join("\n") + "\n" +
+        `Prefer these when you need shell access. You may add | head, | tail, | grep, or 2>&1 to any of them.\n` +
+        `[/pre-approved run_bash commands]`
+      );
+    }
+    
+    if (parts.length) {
+      session.messages.push({ role: "user", content: parts.join("\n\n") });
     }
   }
   if (values.model) session.model = values.model;
@@ -827,13 +843,15 @@ async function main(): Promise<void> {
   const pending = session.pendingBash;
   if (values.approve || values["always-approve"]) {
     if (!pending) die(`Nothing is awaiting approval in session ${session.id}.`);
+    // Extract base command for approval — variations with pipes/redirects are also approved
+    const { base: baseCmd } = extractBaseCommand(pending.command);
     if (values["always-approve"]) {
-      if (!projectCfg.alwaysApprove.includes(pending.command)) {
-        projectCfg.alwaysApprove.push(pending.command);
+      if (!projectCfg.alwaysApprove.includes(baseCmd)) {
+        projectCfg.alwaysApprove.push(baseCmd);
       }
       saveProjectConfig(cfg, projectCfg);
     } else {
-      session.approvedOnce.push(pending.command);
+      session.approvedOnce.push(baseCmd);
     }
     session.pendingBash = null;
     prompt = `Approved. Run \`${pending.command}\` and continue.`;
