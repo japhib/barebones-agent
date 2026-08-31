@@ -59,9 +59,16 @@ export interface Config {
   editor: string[];
   renderer: Renderer;
   sessionDir: string;
-  alwaysApprove: string[];
   requestTimeoutMs: number;
   bashTimeoutMs: number;
+}
+
+/** Per-project configuration, stored in .agent/project.json beside the sessions. */
+export interface ProjectConfig {
+  /** Custom file to read for project context instead of AGENTS.md / README.md. */
+  contextFile?: string;
+  /** Commands that never need approval for run_bash. */
+  alwaysApprove: string[];
 }
 
 export interface PendingQuestion {
@@ -122,6 +129,7 @@ export interface Interrupt {
 
 export interface Ctx {
   cfg: Config;
+  projectCfg: ProjectConfig;
   session: Session;
   progress: Progress;
   interrupt: Interrupt;
@@ -129,6 +137,12 @@ export interface Ctx {
 
 export function saveConfig(cfg: Config): void {
   fs.writeFileSync(CONFIG_PATH, `${JSON.stringify(cfg, null, 2)}\n`);
+}
+
+export function saveProjectConfig(cfg: Config, projectCfg: ProjectConfig): void {
+  const dir = path.resolve(CWD, cfg.sessionDir);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "project.json"), `${JSON.stringify(projectCfg, null, 2)}\n`);
 }
 
 /** Tools are instantiated by NodeLLM from bare classes, so they cannot be handed

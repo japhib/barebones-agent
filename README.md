@@ -249,9 +249,9 @@ run_bash wants to run:
 ```
 
 `y` runs it and the agent carries on in the same process — no re-invoke, no re-sending
-the history. `a` also appends it to `alwaysApprove` in the config, so it is never asked
-again in any session. Only **`n`** ends the turn, writing a `## Declined` block and
-handing you the editor to say what to do instead.
+the history. `a` also appends it to `alwaysApprove` in the project config, so it is never
+asked again in this project. Only **`n`** ends the turn, writing a `## Declined` block
+and handing you the editor to say what to do instead.
 
 With no terminal to ask on — piped stdin, a cron job, CI — it falls back to the
 transcript flow instead of hanging: the request is written out and the turn ends, to be
@@ -328,7 +328,6 @@ CLI flag → environment → config file → default.
   "editor": ["code", "--wait"],
   "renderer": "auto",
   "sessionDir": ".agent",
-  "alwaysApprove": [],
   "requestTimeoutMs": 600000,
   "bashTimeoutMs": 120000
 }
@@ -350,6 +349,26 @@ instantly and the agent reads a transcript you have not typed into yet.
 `glow` / `bat` / `none`. Under `auto`, if neither is installed the agent says so once per
 run before printing plain Markdown — set `renderer` explicitly to silence it. The notice
 is skipped when stdout is redirected, since piping already implies you want plain text.
+
+### Project configuration
+
+Per-project settings live in `.agent/project.json`, beside the session files. This file is
+optional and not created automatically.
+
+```json
+{
+  "contextFile": "GOOD_TO_KNOW.md",
+  "alwaysApprove": ["npm test", "npm run build"]
+}
+```
+
+`contextFile` overrides the default project context file. By default, new sessions
+automatically read `AGENTS.md` (or `README.md` as a fallback) from the project root to
+give the agent project-specific context. Set this to use a different file instead.
+
+`alwaysApprove` lists shell commands that `run_bash` may execute without asking. These are
+project-specific — a command approved in one repo does not carry to another. Use
+`--always-approve` to add to this list interactively.
 
 ## Caching
 

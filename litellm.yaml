@@ -10,10 +10,6 @@ model_list:
       model: vertex_ai/claude-sonnet-4-5@20250929
       vertex_project: "REPLACE_WITH_GCP_PROJECT"
       vertex_location: us-east5
-      # Anthropic cache helper
-      cache_control_injection_points:
-        - { location: message, role: system }
-        - { location: tool_config }
 
   - model_name: deepseek
     litellm_params:

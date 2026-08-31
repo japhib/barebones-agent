@@ -28,22 +28,24 @@ import {
   MAX_READ_LINES,
   PLACEHOLDER_API_KEY,
   saveConfig,
+  saveProjectConfig,
   setContext,
   zeroUsage,
   type Config,
+  type Interrupt,
   type Mode,
   type PendingBash,
   type PendingQuestion,
+  type ProjectConfig,
   type Renderer,
-  type Interrupt,
   type Session,
   type Usage,
 } from "./context.js";
 
 // ---------------------------------------------------------------- constants
 
-const MAX_TOOL_CALLS = 50;
-/** The launchd job that keeps the proxy alive; named in the error when it is not. */
+const MAX_TOOL_CALLS = 100;
+/** The launchd job that keeps the proxy alive; named in the error when it is not found to be running. */
 const LAUNCH_AGENT = "com.barebones-agent.litellm";
 const MAX_OUTPUT_TOKENS = 16_000;
 
@@ -67,7 +69,6 @@ const DEFAULT_CONFIG: Config = {
   editor: [],
   renderer: "auto",
   sessionDir: ".agent",
-  alwaysApprove: [],
   requestTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
   bashTimeoutMs: DEFAULT_BASH_TIMEOUT_MS,
 };
@@ -106,9 +107,6 @@ export function mergeConfig(
     // null means "leave the default": no key carries it as a meaningful value.
     if (v !== null) (cfg as Record<string, unknown>)[k] = v;
   }
-  // Un-aliased from DEFAULT_CONFIG, which a shallow spread would otherwise share:
-  // --always-approve appends to this list in place.
-  cfg.alwaysApprove = [...cfg.alwaysApprove];
   return cfg;
 }
 
@@ -125,6 +123,40 @@ function loadConfig(): Config {
     die(`Could not parse ${CONFIG_PATH}: ${err instanceof Error ? err.message : String(err)}`);
   }
   return mergeConfig(raw);
+}
+
+// ---------------------------------------------------------------- project config
+
+const DEFAULT_PROJECT_CONFIG: ProjectConfig = { alwaysApprove: [] };
+
+function projectConfigPath(cfg: Config): string {
+  return path.join(sessionDir(cfg), "project.json");
+}
+
+/**
+ * Load .agent/project.json if it exists, otherwise return defaults.
+ * Does not create the file — it is optional and user-authored.
+ */
+export function loadProjectConfig(cfg: Config): ProjectConfig {
+  const p = projectConfigPath(cfg);
+  if (!fs.existsSync(p)) return { ...DEFAULT_PROJECT_CONFIG, alwaysApprove: [] };
+  try {
+    const raw = JSON.parse(fs.readFileSync(p, "utf8")) as Record<string, unknown>;
+    const proj: ProjectConfig = { alwaysApprove: [] };
+    if (typeof raw.contextFile === "string") proj.contextFile = raw.contextFile;
+    if (Array.isArray(raw.alwaysApprove)) {
+      proj.alwaysApprove = raw.alwaysApprove.filter((x): x is string => typeof x === "string");
+    }
+    // Warn about unknown keys, same as global config.
+    for (const k of Object.keys(raw)) {
+      if (k !== "contextFile" && k !== "alwaysApprove") {
+        process.stderr.write(`warning: unknown project config key "${k}" in ${p}\n`);
+      }
+    }
+    return proj;
+  } catch (err) {
+    die(`Could not parse ${p}: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 export function resolveEditor(cliEditor: string | undefined, cfg: Config): string[] {
@@ -151,6 +183,35 @@ function jsonPath(cfg: Config, id: string): string {
 }
 function mdPath(cfg: Config, id: string): string {
   return path.join(sessionDir(cfg), `${id}.md`);
+}
+
+/** Max characters to read from AGENTS.md / README.md for project context. */
+const MAX_PROJECT_CONTEXT = 20_000;
+
+/**
+ * Read project context from the current directory.
+ *
+ * If `contextFile` is set (from project config), read only that file.
+ * Returns the content wrapped in markers, or null if no file exists.
+ */
+export function readProjectContext(contextFile?: string): string | null {
+  const candidates = contextFile ? [contextFile] : ["AGENTS.md", "CLAUDE.md", "README.md"];
+  for (const name of candidates) {
+    const p = path.join(CWD, name);
+    if (!fs.existsSync(p)) continue;
+    try {
+      let content = fs.readFileSync(p, "utf8").trim();
+      if (!content) continue;
+      if (content.length > MAX_PROJECT_CONTEXT) {
+        content = `${content.slice(0, MAX_PROJECT_CONTEXT)}\n\n[truncated ${content.length - MAX_PROJECT_CONTEXT} characters]`;
+      }
+      return `[project context from ${name}]\n${content}\n[/project context]`;
+    } catch {
+      // Permission error, binary file, etc. — try next.
+      continue;
+    }
+  }
+  return null;
 }
 
 function newSession(model: string, mode: Mode): Session {
@@ -420,7 +481,12 @@ That turns the reply the user is about to write into a prompt telling them they 
 
 Write your final answer as Markdown. Be concise and concrete: reference files as
 path:line, show only the code that matters, and say plainly what you did and what you
-did not do.`;
+did not do.
+
+BEST PRACTICES:
+- For every code change made, add automated tests (or update existing ones) to document new or changed behavior.
+- If you're fixing a bug, add a regression test.
+`;
 
 export function modeMessage(mode: Mode): string {
   return mode === "plan"
@@ -714,13 +780,23 @@ async function main(): Promise<void> {
 
   const mode: Mode = values.plan ? "plan" : values.act ? "act" : "act";
   const model = values.model || cfg.model;
-  const session = values.session ? loadSession(cfg, values.session) : newSession(model, mode);
+  const isNewSession = !values.session;
+  const session = isNewSession ? newSession(model, mode) : loadSession(cfg, values.session);
+  const projectCfg = loadProjectConfig(cfg);
+  // Inject project context at the start of new sessions.
+  // Uses contextFile from project config if set, else AGENTS.md / CLAUDE.md / README.md.
+  if (isNewSession) {
+    const projectContext = readProjectContext(projectCfg.contextFile);
+    if (projectContext) {
+      session.messages.push({ role: "user", content: projectContext });
+    }
+  }
   if (values.model) session.model = values.model;
   if (values.plan) session.mode = "plan";
   if (values.act) session.mode = "act";
   const progress = new Progress(!values.quiet);
   const interrupt: Interrupt = { requested: false, hard: false };
-  setContext({ cfg, session, progress, interrupt });
+  setContext({ cfg, projectCfg, session, progress, interrupt });
 
   const resume = `${invocation()} -s ${session.id}`;
 
@@ -739,8 +815,10 @@ async function main(): Promise<void> {
   if (values.approve || values["always-approve"]) {
     if (!pending) die(`Nothing is awaiting approval in session ${session.id}.`);
     if (values["always-approve"]) {
-      if (!cfg.alwaysApprove.includes(pending.command)) cfg.alwaysApprove.push(pending.command);
-      saveConfig(cfg);
+      if (!projectCfg.alwaysApprove.includes(pending.command)) {
+        projectCfg.alwaysApprove.push(pending.command);
+      }
+      saveProjectConfig(cfg, projectCfg);
     } else {
       session.approvedOnce.push(pending.command);
     }

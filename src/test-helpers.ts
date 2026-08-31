@@ -13,6 +13,7 @@ import {
   zeroUsage,
   type Config,
   type Ctx,
+  type ProjectConfig,
   type Session,
 } from "./context.js";
 
@@ -24,9 +25,15 @@ export function fakeConfig(over: Partial<Config> = {}): Config {
     editor: [],
     renderer: "none",
     sessionDir: ".agent",
-    alwaysApprove: [],
     requestTimeoutMs: 1_000,
     bashTimeoutMs: 1_000,
+    ...over,
+  };
+}
+
+export function fakeProjectConfig(over: Partial<ProjectConfig> = {}): ProjectConfig {
+  return {
+    alwaysApprove: [],
     ...over,
   };
 }
@@ -52,10 +59,11 @@ export function fakeSession(over: Partial<Session> = {}): Session {
  *  `mode` or `interrupt.requested` and have the tools see the change. Progress is
  *  silent unless a test passes its own: most assert on tool output, not narration. */
 export function useContext(
-  over: { cfg?: Partial<Config>; session?: Partial<Session>; progress?: Progress } = {},
+  over: { cfg?: Partial<Config>; projectCfg?: Partial<ProjectConfig>; session?: Partial<Session>; progress?: Progress } = {},
 ): Ctx {
   const ctx: Ctx = {
     cfg: fakeConfig(over.cfg),
+    projectCfg: fakeProjectConfig(over.projectCfg),
     session: fakeSession(over.session),
     progress: over.progress ?? new Progress(false),
     interrupt: { requested: false, hard: false },

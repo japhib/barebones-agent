@@ -20,7 +20,7 @@ import {
   cap,
   ctx,
   resolveSafe,
-  saveConfig,
+  saveProjectConfig,
 } from "./context.js";
 import { changeStat, describeChange, paintChange, type Change } from "./changes.js";
 
@@ -332,10 +332,10 @@ class RunBashTool extends SafeTool<z.infer<typeof runBashArgs>> {
   schema = runBashArgs;
   protected async run({ command, reason }: z.infer<typeof runBashArgs>) {
     this.requireAct();
-    const { cfg, session } = ctx();
+    const { cfg, projectCfg, session } = ctx();
     const once = session.approvedOnce.indexOf(command);
 
-    if (cfg.alwaysApprove.includes(command)) {
+    if (projectCfg.alwaysApprove.includes(command)) {
       // already blanket-approved
     } else if (once !== -1) {
       session.approvedOnce.splice(once, 1); // a one-shot approval is spent
@@ -352,8 +352,8 @@ class RunBashTool extends SafeTool<z.infer<typeof runBashArgs>> {
         return this.halt(`The user declined to run \`${command}\`.`);
       }
       if (answer === "always") {
-        cfg.alwaysApprove.push(command);
-        saveConfig(cfg);
+        projectCfg.alwaysApprove.push(command);
+        saveProjectConfig(cfg, projectCfg);
       }
     }
     const limit = cfg.bashTimeoutMs;

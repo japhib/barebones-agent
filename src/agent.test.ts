@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import test, { describe } from "node:test";
 import type { Message } from "@node-llm/core";
 
-import { addUsage, formatUsage, mergeConfig, newNarration, turnUsage } from "./agent.js";
+import { addUsage, formatUsage, loadProjectConfig, mergeConfig, newNarration, readProjectContext, turnUsage } from "./agent.js";
 import { DEFAULT_BASE_URL, DEFAULT_MODEL, zeroUsage } from "./context.js";
+import { fakeConfig, tmpDir, writeTmp } from "./test-helpers.js";
 
 /** mergeConfig warns through a callback, so a test can both silence it and assert on it. */
 function merge(raw: Record<string, unknown>): { cfg: ReturnType<typeof mergeConfig>; warnings: string[] } {
@@ -54,14 +56,6 @@ describe("mergeConfig", () => {
     const { cfg } = merge({ baseUrl: "http://127.0.0.1:8000/v1", apiKeyEnv: "MY_KEY" });
     assert.equal(cfg.baseUrl, "http://127.0.0.1:8000/v1");
     assert.equal(cfg.apiKeyEnv, "MY_KEY");
-  });
-
-  test("alwaysApprove is not shared between two merges", () => {
-    // A shallow spread of DEFAULT_CONFIG would alias it, and --always-approve appends
-    // to this list in place, so the entry would leak from one load to the next.
-    const a = mergeConfig({}, () => {});
-    a.alwaysApprove.push("rm -rf /");
-    assert.deepEqual(mergeConfig({}, () => {}).alwaysApprove, []);
   });
 });
 
@@ -187,5 +181,90 @@ describe("formatUsage", () => {
 
   test("a single request is not pluralised", () => {
     assert.match(formatUsage("turn", { input: 1, output: 1, requests: 1, turns: 1 }), /1 request$/);
+  });
+});
+
+// ---------------------------------------------------------------- project config
+
+describe("loadProjectConfig", () => {
+  test("returns defaults when file does not exist", () => {
+    const dir = tmpDir("projcfg-no-file");
+    const cfg = fakeConfig({ sessionDir: dir });
+    const proj = loadProjectConfig(cfg);
+    assert.deepEqual(proj, { alwaysApprove: [] });
+    assert.equal(proj.contextFile, undefined);
+  });
+
+  test("loads contextFile from project.json", () => {
+    const dir = tmpDir("projcfg-context-file");
+    writeTmp(path.join(dir, "project.json"), JSON.stringify({ contextFile: "NOTES.md" }));
+    const cfg = fakeConfig({ sessionDir: dir });
+    const proj = loadProjectConfig(cfg);
+    assert.equal(proj.contextFile, "NOTES.md");
+  });
+
+  test("loads alwaysApprove from project.json", () => {
+    const dir = tmpDir("projcfg-always-approve");
+    writeTmp(path.join(dir, "project.json"), JSON.stringify({ alwaysApprove: ["npm test", "npm run build"] }));
+    const cfg = fakeConfig({ sessionDir: dir });
+    const proj = loadProjectConfig(cfg);
+    assert.deepEqual(proj.alwaysApprove, ["npm test", "npm run build"]);
+  });
+
+  test("alwaysApprove is not shared between two loads", () => {
+    // Ensures the array is copied, so mutations don't leak between sessions.
+    const dir = tmpDir("projcfg-isolation");
+    writeTmp(path.join(dir, "project.json"), JSON.stringify({ alwaysApprove: [] }));
+    const cfg = fakeConfig({ sessionDir: dir });
+    const a = loadProjectConfig(cfg);
+    a.alwaysApprove.push("rm -rf /");
+    const b = loadProjectConfig(cfg);
+    assert.deepEqual(b.alwaysApprove, []);
+  });
+
+  test("filters non-string entries from alwaysApprove", () => {
+    const dir = tmpDir("projcfg-filter");
+    writeTmp(path.join(dir, "project.json"), JSON.stringify({ alwaysApprove: ["valid", 123, null, "also valid"] }));
+    const cfg = fakeConfig({ sessionDir: dir });
+    const proj = loadProjectConfig(cfg);
+    assert.deepEqual(proj.alwaysApprove, ["valid", "also valid"]);
+  });
+});
+
+// ---------------------------------------------------------------- project context
+
+describe("readProjectContext", () => {
+  // These tests write files to CWD subdirectories. Since readProjectContext uses CWD
+  // directly, we test the contextFile override path which lets us point at test files.
+
+  test("returns null when no context file exists", () => {
+    // With a non-existent file override, returns null
+    const result = readProjectContext("test-tmp/ctx-nonexistent/AGENTS.md");
+    assert.equal(result, null);
+  });
+
+  test("reads a custom context file when specified", () => {
+    writeTmp("test-tmp/ctx-custom/NOTES.md", "# Project Notes\n\nThis is custom context.");
+    const result = readProjectContext("test-tmp/ctx-custom/NOTES.md");
+    assert.ok(result);
+    assert.match(result, /\[project context from test-tmp\/ctx-custom\/NOTES\.md\]/);
+    assert.match(result, /# Project Notes/);
+    assert.match(result, /\[\/project context\]/);
+  });
+
+  test("skips empty files", () => {
+    writeTmp("test-tmp/ctx-empty/EMPTY.md", "   \n\n  ");
+    const result = readProjectContext("test-tmp/ctx-empty/EMPTY.md");
+    assert.equal(result, null);
+  });
+
+  test("truncates files over the limit", () => {
+    const huge = "x".repeat(25_000);
+    writeTmp("test-tmp/ctx-huge/BIG.md", huge);
+    const result = readProjectContext("test-tmp/ctx-huge/BIG.md");
+    assert.ok(result);
+    assert.match(result, /\[truncated 5000 characters\]/);
+    // Should contain the start but not the full content
+    assert.ok(result.length < huge.length);
   });
 });
