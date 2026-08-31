@@ -27,7 +27,6 @@ describe("all tools", () => {
       seen.add(t.name);
     }
     assert.deepEqual([...seen].sort(), [
-      "ask_user",
       "delete_file",
       "edit_file",
       "list_tree",
@@ -277,15 +276,6 @@ describe("list_tree", () => {
     const dir = tmpDir("empty");
     const out = await tool("list_tree").execute({ path: dir });
     assert.match(String(out), /is empty\./);
-  });
-});
-
-describe("ask_user", () => {
-  test("records the question on the session and halts", async () => {
-    const c = useContext({ session: { mode: "act" } });
-    const result = await tool("ask_user").execute({ question: "which auth?" });
-    assert.match(String(result), /Asked the user: which auth\?/);
-    assert.equal(c.session.pendingQuestion?.question, "which auth?");
   });
 });
 

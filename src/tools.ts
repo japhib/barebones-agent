@@ -236,20 +236,6 @@ class DeleteFileTool extends SafeTool<z.infer<typeof deleteFileArgs>> {
   }
 }
 
-const askUserArgs = z.object({
-  question: z.string().describe("The question, phrased so it can be answered directly"),
-});
-class AskUserTool extends SafeTool<z.infer<typeof askUserArgs>> {
-  name = "ask_user";
-  description =
-    "Ask the user a question when their answer would change what you build. This ends your turn: the question is written to the transcript and the user answers by re-invoking. Use it for genuine forks, not for things you can decide yourself.";
-  schema = askUserArgs;
-  protected async run({ question }: z.infer<typeof askUserArgs>) {
-    ctx().session.pendingQuestion = { question };
-    return this.halt(`Asked the user: ${question}`);
-  }
-}
-
 type Approval = "yes" | "always" | "no";
 const APPROVAL_KEYS: Record<string, Approval> = { y: "yes", a: "always", n: "no" };
 
@@ -386,6 +372,5 @@ export const TOOLS = [
   WriteFileTool,
   EditFileTool,
   DeleteFileTool,
-  AskUserTool,
   RunBashTool,
 ];
