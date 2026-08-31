@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test, { describe } from "node:test";
 
-import { PROVIDERS, createClient, providerSpec, summaryModel } from "./providers.js";
+import { PROVIDERS, createClient, defaultModels, modelFor, providerSpec, summaryModel } from "./providers.js";
 import { fakeConfig } from "./test-helpers.js";
 
 describe("providerSpec", () => {
@@ -34,6 +34,50 @@ describe("providerSpec", () => {
   });
 });
 
+describe("defaultModels", () => {
+  test("covers every provider with that provider's own default", () => {
+    const models = defaultModels();
+    assert.deepEqual(Object.keys(models).sort(), Object.keys(PROVIDERS).sort());
+    for (const [name, spec] of Object.entries(PROVIDERS)) {
+      assert.equal(models[name], spec.defaultModel);
+    }
+  });
+
+  test("hands back a fresh object each call, so one config cannot edit another's", () => {
+    const a = defaultModels();
+    a.anthropic = "scribbled-on";
+    assert.notEqual(defaultModels().anthropic, "scribbled-on");
+  });
+
+  test("DeepSeek runs v4 pro by default", () => {
+    assert.equal(defaultModels().deepseek, "deepseek-v4-pro");
+    assert.equal(providerSpec("deepseek").defaultModel, "deepseek-v4-pro");
+  });
+});
+
+describe("modelFor", () => {
+  test("prefers the model configured for that provider", () => {
+    const cfg = fakeConfig({ models: { anthropic: "claude-sonnet-5", deepseek: "deepseek-v4-flash" } });
+    assert.equal(modelFor(cfg, "anthropic"), "claude-sonnet-5");
+    assert.equal(modelFor(cfg, "deepseek"), "deepseek-v4-flash");
+  });
+
+  test("reads the asked-for provider, not whichever one is configured as default", () => {
+    // The regression this keying exists to prevent: a Claude id sent to DeepSeek's API.
+    const cfg = fakeConfig({ provider: "anthropic", models: { anthropic: "claude-opus-5" } });
+    assert.equal(modelFor(cfg, "deepseek"), "deepseek-v4-pro");
+  });
+
+  test("falls back to the provider default when the map has no entry, or a blank one", () => {
+    assert.equal(modelFor(fakeConfig({ models: {} }), "vertex"), providerSpec("vertex").defaultModel);
+    assert.equal(modelFor(fakeConfig({ models: { vertex: "" } }), "vertex"), providerSpec("vertex").defaultModel);
+  });
+
+  test("throws on an unknown provider rather than returning a blank model", () => {
+    assert.throws(() => modelFor(fakeConfig({ models: {} }), "grok"), /Unknown provider "grok"/);
+  });
+});
+
 describe("summaryModel", () => {
   test("prefers the config override", () => {
     const cfg = fakeConfig({ summaryModel: "my-cheap" });
@@ -41,6 +85,7 @@ describe("summaryModel", () => {
   });
 
   test("falls back to the provider default", () => {
+    // Deliberately not the v4-pro default: summaries are throwaway prose.
     assert.equal(summaryModel(fakeConfig({ summaryModel: null }), "deepseek"), "deepseek-chat");
     assert.equal(summaryModel(fakeConfig({ summaryModel: null }), "vertex"), "claude-haiku-4-5@20251001");
   });

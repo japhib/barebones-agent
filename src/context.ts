@@ -21,6 +21,11 @@ export const MAX_TREE_DEPTH = 6;
 export const MAX_TREE_ENTRIES = 500;
 export const MAX_TOOL_OUTPUT = 60_000;
 
+/** How much of its work an editing tool shows. This is narration, not a document: a
+ *  rewrite longer than this is better read in the file than scrolled past in the
+ *  terminal. */
+export const MAX_CHANGE_LINES = 200;
+
 /** NodeLLM's own default is 30s, which a reasoning model exploring a real codebase
  *  blows through routinely. Both are overridable from config and the CLI. */
 export const DEFAULT_REQUEST_TIMEOUT_MS = 600_000;
@@ -76,8 +81,10 @@ export const DEFAULT_PRICING: Record<string, ModelPrice> = {
   ...namespaced("vertex", CLAUDE_PRICING),
   // No cacheWrite: DeepSeek populates its cache as a side effect of a normal request
   // and bills nothing for it, so there is no third category to report.
-  "deepseek/deepseek-chat": { input: 0.28, output: 0.42, cacheRead: 0.028 },
-  "deepseek/deepseek-reasoner": { input: 0.28, output: 0.42, cacheRead: 0.028 },
+  "deepseek/deepseek-v4-pro": { input: 0.435, output: 0.87, cacheRead: 0.003625 },
+  "deepseek/deepseek-v4-flash": { input: 0.14, output: 0.28, cacheRead: 0.0028 },
+  "deepseek/deepseek-chat": { input: 0.14, output: 0.28, cacheRead: 0.0028 },
+  "deepseek/deepseek-reasoner": { input: 0.14, output: 0.28, cacheRead: 0.0028 },
 };
 
 /**
@@ -100,7 +107,13 @@ export function priceFor(cfg: Config, provider: string, model: string): ModelPri
 export interface Config {
   /** A key of PROVIDERS in providers.ts: which API new sessions talk to. */
   provider: string;
-  model: string;
+  /**
+   * The model to run, keyed by provider name. A model id is only meaningful to the API
+   * it belongs to, so there is no single global id to hold: `--provider deepseek` has
+   * to reach DeepSeek's entry, not the one Anthropic was left on. A provider missing
+   * from the map falls back to its ProviderSpec.defaultModel.
+   */
+  models: Record<string, string>;
   /** Model used to write compaction summaries. Null takes the provider's own default. */
   summaryModel: string | null;
   /** Vertex only. The project is required; the region defaults to us-east5. */

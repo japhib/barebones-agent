@@ -55,7 +55,8 @@ Every run prints the exact command to continue:
 | `--usage` | Report the session's token spend and exit |
 | `-l` / `--sessions` | List the sessions saved in this directory, newest first, each with the command to resume it |
 | `Ctrl-C` | Stop the turn and save it; twice cuts a request in flight |
-| `--model <id>` `--editor <cmd>` `--compact-at <n>` `--verbose` `--help` | |
+| `--model <id>` | Override the model for this session; otherwise `models[provider]` from the config |
+| `--editor <cmd>` `--compact-at <n>` `--verbose` `--help` | |
 
 ### Finding an old session
 
@@ -131,6 +132,38 @@ A tiny project — let me read everything.
 
 `(switched)` appears only on the run where the mode actually changed.
 
+Narration starts at what this turn adds. A resumed session hands the model its whole
+history before the turn begins, so the mark the narrator opens at is that restored
+length — otherwise the first tool call replays every answer the session has ever given.
+
+#### Edits
+
+`write_file` and `edit_file` show what they changed, in the same stream, so an edit can
+be read as it lands rather than reconstructed from `git diff` afterwards:
+
+```
+  edit_file src/greet.ts:12 +2 -2
+  -  const greeting = "hello";
+  -  console.log(greeting + " " + name);
+  +  const greeting = "hey there";
+  +  console.log(`${greeting} ${name}`);
+```
+
+There is no diff algorithm behind this, and no `diff` subprocess. There does not need to
+be: `edit_file` is handed the before and after text as `old_string` and `new_string`, so
+the change is already sitting in the tool's arguments. `old_string` is also the span the
+model *chose* to replace, which makes printing it verbatim more faithful than a
+re-derived diff — you see the edit the way the model meant it, not the minimal one an
+algorithm would find inside it.
+
+Creating a file is labelled `(new file)` and is all additions; overwriting one shows what
+it replaced as well; writing identical bytes says `(no change)`. The body is capped at
+200 lines, removals giving way first, with a count of what was held back.
+
+The model gets only the `+2 -1` stat back: it wrote the change, and feeding it back would
+bill you for reading it twice. `--quiet` suppresses this along with the rest of the
+narration.
+
 **stdout is untouched** — still the finished answer, buffered, rendered once as Markdown.
 So `bba "..." | glow` or `> out.md` behaves exactly as before, and the spinner is erased
 when the turn ends. Off a TTY the animation is skipped and only the meaningful lines are
@@ -184,7 +217,7 @@ So the plan → build handoff is one word typed where you are already reading.
 | Tool | Approval |
 |---|---|
 | `read_file`, `list_tree`, `search_code`, `web_search` | automatic |
-| `write_file`, `edit_file`, `delete_file` | automatic (act mode only) |
+| `write_file`, `edit_file`, `delete_file` | automatic (act mode only); the first two show what changed |
 | `ask_user` | ends the turn; you answer by re-invoking |
 | `run_bash` | **always** requires your explicit approval |
 
@@ -225,7 +258,9 @@ answered with `--approve`, `--always-approve` or `--decline [reason]` on the nex
 
 ## Providers
 
-Set the default in config, or pass `--provider` to start a session on another one. The
+Set the default in config, or pass `--provider` to start a session on another one. Each
+provider carries its own model under `models`, so switching provider picks up that
+provider's model rather than sending a Claude id to DeepSeek's API. The
 provider is **pinned to the session**: a history is written in one API's dialect, with
 its tool-call ids and message shapes, so `--provider` on a resume is refused rather than
 silently reinterpreted. Sessions written before providers existed resume as `anthropic`.
@@ -233,7 +268,7 @@ silently reinterpreted. Sessions written before providers existed resume as `ant
 | | Credential | Default model | Notes |
 |---|---|---|---|
 | `anthropic` | `ANTHROPIC_API_KEY` | `claude-opus-5` | Prompt caching, full usage breakdown |
-| `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-chat` | No cache reporting — see below |
+| `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-v4-pro` | No cache reporting — see below |
 | `vertex` | `gcloud`, or `VERTEX_ACCESS_TOKEN` | `claude-sonnet-4-5@20250929` | Claude on GCP; caching works |
 
 `bba -l` and the run banner label anything other than Anthropic as `provider:model`.
@@ -300,7 +335,11 @@ CLI flag → environment → config file → default.
 ```json
 {
   "provider": "anthropic",
-  "model": "claude-opus-5",
+  "models": {
+    "anthropic": "claude-opus-5",
+    "deepseek": "deepseek-v4-pro",
+    "vertex": "claude-sonnet-4-5@20250929"
+  },
   "summaryModel": null,
   "vertexProject": null,
   "vertexRegion": "us-east5",
@@ -317,6 +356,13 @@ CLI flag → environment → config file → default.
   }
 }
 ```
+
+`models` is the model each provider runs, and merges per provider over the built-in
+defaults — naming one leaves the rest alone. A model id only means anything to the API it
+belongs to, so there is no single global id: `--provider deepseek` reads `models.deepseek`
+and nothing else. A provider you leave out falls back to its default from the table above,
+and `--model` beats both. The older single `"model"` key is still honoured, as the entry
+for whatever `provider` that config selects.
 
 `pricing` is US dollars per million tokens and merges per model over the built-in table,
 so overriding one model keeps the rest. `cacheWrite` is the **1h-TTL** rate (2× input),
@@ -404,6 +450,7 @@ record — compaction only affects what is sent to the model.
 src/context.ts    shared types, pricing table, path guard, tool context
 src/tools.ts      the nine tools
 src/progress.ts   stderr activity display
+src/changes.ts    what an edit changed, painted for the terminal
 src/compact.ts    history compaction
 src/providers.ts  the provider table, and building a client from it
 src/vertex.ts     the Vertex AI provider NodeLLM does not ship
@@ -426,7 +473,8 @@ saved to the session first, so nothing already done is lost.
   skip validation (which drops the output ceiling to 8k and logs a warning every run),
   the agent registers unknown models with `ModelRegistry.save()` before use, taking
   their rates from the `pricing` config. Any newer model id works the same way. This is
-  a no-op for DeepSeek, whose four models the bundled registry does know, and
+  a no-op for DeepSeek, whose models — `deepseek-v4-pro` included — the bundled
+  registry does know, and
   load-bearing for Vertex, which has no entries there at all.
 - Its providers are `anthropic`, `bedrock`, `deepseek`, `gemini`, `mistral`, `ollama`,
   `openai`, `openrouter` and `xai` — no Vertex, hence `src/vertex.ts`.

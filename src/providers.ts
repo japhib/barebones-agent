@@ -59,14 +59,16 @@ export const PROVIDERS: Record<string, ProviderSpec> = {
     id: "deepseek",
     envVar: "DEEPSEEK_API_KEY",
     configKey: "deepseekApiKey",
-    defaultModel: "deepseek-chat",
+    defaultModel: "deepseek-v4-pro",
+    // Summaries are throwaway prose, so they run on the cheap chat model rather than
+    // the reasoning-heavy default.
     summaryModel: "deepseek-chat",
     // OpenAI-shaped API. DeepSeek caches automatically and has no opt-in parameter.
     cacheControl: false,
     reportsCache: false,
     family: "deepseek",
-    contextWindow: 128_000,
-    maxOutputTokens: 8_192,
+    contextWindow: 1_000_000,
+    maxOutputTokens: 384_000,
   },
   vertex: {
     id: "vertex",
@@ -88,6 +90,27 @@ export function providerSpec(name: string): ProviderSpec {
   const spec = PROVIDERS[name];
   if (!spec) throw new Error(`Unknown provider "${name}". Known: ${Object.keys(PROVIDERS).join(", ")}.`);
   return spec;
+}
+
+/**
+ * Every provider's stock model, as the shape the config's "models" map starts at.
+ *
+ * A fresh config file lists all of them rather than just the active one, so switching
+ * provider is a flag away and the model each one runs is visible in a single place.
+ */
+export function defaultModels(): Record<string, string> {
+  return Object.fromEntries(Object.entries(PROVIDERS).map(([name, spec]) => [name, spec.defaultModel]));
+}
+
+/**
+ * The model to run on a given provider.
+ *
+ * Keyed by provider rather than held as one global id, because a model id only means
+ * anything to the API it belongs to: asking for `--provider deepseek` has to pick up
+ * DeepSeek's configured model, not whatever Anthropic was last set to.
+ */
+export function modelFor(cfg: Config, provider: string): string {
+  return cfg.models[provider] || providerSpec(provider).defaultModel;
 }
 
 /** The model this session's compaction summariser should use. */

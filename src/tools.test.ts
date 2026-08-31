@@ -3,7 +3,8 @@ import test, { after, describe } from "node:test";
 import type { Tool } from "@node-llm/core";
 
 import { TOOLS } from "./tools.js";
-import { cleanTmp, tmpDir, useContext, writeTmp } from "./test-helpers.js";
+import { Progress } from "./progress.js";
+import { captureStderr, cleanTmp, tmpDir, useContext, writeTmp } from "./test-helpers.js";
 
 /** Instantiate a tool from the exported TOOLS array by name. */
 function tool(name: string): Tool {
@@ -88,13 +89,112 @@ describe("read_file", () => {
   });
 });
 
+describe("what the editing tools show", () => {
+  /** Run a tool with a narrating Progress and return what the user would have seen.
+   *  Progress writes to stderr; off a TTY it prints plain lines rather than animating. */
+  async function shown(run: () => Promise<unknown>): Promise<string> {
+    useContext({ session: { mode: "act" }, progress: new Progress(true) });
+    return captureStderr(async () => {
+      await run();
+    });
+  }
+
+  test("edit_file shows its own arguments: old_string out, new_string in", async () => {
+    const dir = tmpDir("show-edit");
+    const rel = writeTmp(`${dir}/e.txt`, "one\ntwo\nthree\n");
+    const out = await shown(() => tool("edit_file").execute({ path: rel, old_string: "two", new_string: "TWO" }));
+
+    assert.ok(out.includes("\x1b[31m-two"), "the replaced span, in red");
+    assert.ok(out.includes("\x1b[32m+TWO"), "its replacement, in green");
+    assert.ok(out.includes(`edit_file ${rel}:2`), "labelled with the file and the line it edited");
+  });
+
+  test("the line number counts newlines before the match", async () => {
+    const dir = tmpDir("show-line");
+    const rel = writeTmp(`${dir}/n.txt`, "a\nb\nc\nd\nTARGET\ne\n");
+    const out = await shown(() => tool("edit_file").execute({ path: rel, old_string: "TARGET", new_string: "HIT" }));
+    assert.ok(out.includes(`${rel}:5`), `expected :5 in ${JSON.stringify(out)}`);
+  });
+
+  test("a multi-line replacement shows every line of both spans", async () => {
+    const dir = tmpDir("show-multi");
+    const rel = writeTmp(`${dir}/m.txt`, "keep\nold1\nold2\nkeep\n");
+    const out = await shown(() =>
+      tool("edit_file").execute({ path: rel, old_string: "old1\nold2", new_string: "new1\nnew2\nnew3" }),
+    );
+    for (const line of ["-old1", "-old2", "+new1", "+new2", "+new3"]) {
+      assert.ok(out.includes(line), `expected ${line}`);
+    }
+    assert.ok(!out.includes("keep"), "untouched text is not reprinted");
+  });
+
+  test("write_file marks a file it created and shows it as all additions", async () => {
+    const dir = tmpDir("show-write");
+    const rel = `${dir}/new.txt`;
+    const out = await shown(() => tool("write_file").execute({ path: rel, content: "alpha\nbeta\n" }));
+
+    assert.ok(out.includes("(new file)"), "says the file did not exist");
+    assert.ok(out.includes("\x1b[32m+alpha") && out.includes("\x1b[32m+beta"));
+    // Red survives in the header's "-0" stat, so look at the diff body itself.
+    const body = out.trimEnd().split("\n").slice(1);
+    assert.ok(body.length, "expected a diff body");
+    assert.ok(!body.some((l) => l.includes("\x1b[31m")), "nothing was removed");
+    assert.ok(out.split("\n")[0]?.includes("-0"), "the stat records zero removals");
+  });
+
+  test("write_file over an existing file also shows what it replaced", async () => {
+    const dir = tmpDir("show-over");
+    const rel = writeTmp(`${dir}/o.txt`, "keep\nold\n");
+    const out = await shown(() => tool("write_file").execute({ path: rel, content: "keep\nnew\n" }));
+
+    assert.ok(!out.includes("(new file)"));
+    assert.ok(out.includes("\x1b[31m-old"), "shows the content it overwrote");
+    assert.ok(out.includes("\x1b[32m+new"));
+  });
+
+  test("rewriting a file with its own contents reports no change", async () => {
+    const dir = tmpDir("show-same");
+    const rel = writeTmp(`${dir}/s.txt`, "unchanged\n");
+    const out = await shown(() => tool("write_file").execute({ path: rel, content: "unchanged\n" }));
+    assert.match(out, /\(no change\)/);
+  });
+
+  test("--quiet suppresses it, since it is narration like any other", async () => {
+    const dir = tmpDir("show-quiet");
+    const rel = writeTmp(`${dir}/q.txt`, "one\n");
+    useContext({ session: { mode: "act" }, progress: new Progress(false) });
+    const out = await captureStderr(async () => {
+      await tool("edit_file").execute({ path: rel, old_string: "one", new_string: "two" });
+    });
+    assert.equal(out, "");
+  });
+
+  test("the model is told the stat, not handed the lines back", async () => {
+    // The display is for the user. Feeding it to the model would bill it for reading
+    // back an edit it just wrote.
+    const dir = tmpDir("show-result");
+    const rel = writeTmp(`${dir}/r.txt`, "a\nb\nc\n");
+    useContext({ session: { mode: "act" }, progress: new Progress(false) });
+    const out = String(await tool("edit_file").execute({ path: rel, old_string: "b", new_string: "B\nB2" }));
+    assert.equal(out, `Edited ${rel} (+2 -1).`);
+    assert.ok(!out.includes("\x1b["), "and no escape codes in the model's history");
+  });
+
+  test("a refused edit prints nothing, because nothing was written", async () => {
+    const dir = tmpDir("show-fail");
+    const rel = writeTmp(`${dir}/x.txt`, "content\n");
+    const out = await shown(() => tool("edit_file").execute({ path: rel, old_string: "absent", new_string: "y" }));
+    assert.equal(out, "");
+  });
+});
+
 describe("write_file / edit_file / delete_file", () => {
   test("write_file creates the file (with parent dirs) and reports the line count", async () => {
     useContext({ session: { mode: "act" } });
     const dir = tmpDir("write");
     const rel = `${dir}/nested/deep/file.txt`;
     const out = await tool("write_file").execute({ path: rel, content: "a\nb\nc" });
-    assert.match(String(out), /Wrote .* \(3 lines\)\./);
+    assert.match(String(out), /Wrote .* \(3 lines, \+3 -0\)\./);
     // read_file round-trips what write_file wrote.
     const read = await tool("read_file").execute({ path: rel });
     assert.equal(read, "1\ta\n2\tb\n3\tc");
@@ -105,7 +205,7 @@ describe("write_file / edit_file / delete_file", () => {
     const dir = tmpDir("edit");
     const rel = writeTmp(`${dir}/e.txt`, "hello world and hello again");
     const out = await tool("edit_file").execute({ path: rel, old_string: "hello world", new_string: "goodbye" });
-    assert.equal(out, `Edited ${rel}.`);
+    assert.equal(out, `Edited ${rel} (+1 -1).`);
     const read = await tool("read_file").execute({ path: rel });
     assert.equal(read, "1\tgoodbye and hello again");
   });

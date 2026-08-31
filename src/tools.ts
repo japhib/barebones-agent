@@ -13,6 +13,7 @@ import {
   CONFIG_PATH,
   CWD,
   DEFAULT_TREE_DEPTH,
+  MAX_CHANGE_LINES,
   MAX_READ_LINES,
   MAX_TREE_DEPTH,
   MAX_TREE_ENTRIES,
@@ -22,6 +23,7 @@ import {
   resolveSafe,
   saveConfig,
 } from "./context.js";
+import { changeStat, describeChange, paintChange, type Change } from "./changes.js";
 
 /** What a tool returns when the user has pressed Ctrl-C. Ending the loop through halt()
  *  rather than a throw means the tool call is still answered, so the history stays valid
@@ -188,6 +190,24 @@ class WebSearchTool extends SafeTool<z.infer<typeof webSearchArgs>> {
   }
 }
 
+/**
+ * Show what an editing tool just did.
+ *
+ * It goes to stderr through Progress, alongside the tool-call line it belongs to, so it
+ * lands in the same stream as the rest of the turn's narration and disappears under
+ * --quiet with it. Only the +/- counts go back to the model: it wrote the change and
+ * does not need it read back, and the lines in the history are tokens paid for twice.
+ */
+function report(label: string, change: Change): Change {
+  ctx().progress.line(paintChange(label, change, MAX_CHANGE_LINES));
+  return change;
+}
+
+/** 1-indexed line that `before` ends on — where the text following it begins. */
+function lineOf(before: string): number {
+  return before.split("\n").length;
+}
+
 const writeFileArgs = z.object({
   path: z.string().describe("File path relative to the current directory"),
   content: z.string().describe("Full file contents"),
@@ -199,9 +219,15 @@ class WriteFileTool extends SafeTool<z.infer<typeof writeFileArgs>> {
   protected async run({ path: p, content }: z.infer<typeof writeFileArgs>) {
     this.requireAct();
     const abs = resolveSafe(p);
+    // Read before the write, so an overwrite shows what it replaced as well as what it
+    // put there. A file that does not exist yet has nothing removed, which is exactly
+    // the all-additions display a creation should get.
+    const existed = fs.existsSync(abs);
+    const before = existed ? fs.readFileSync(abs, "utf8") : "";
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     fs.writeFileSync(abs, content);
-    return `Wrote ${p} (${content.split("\n").length} lines).`;
+    const c = report(`write_file ${p}${existed ? "" : " (new file)"}`, describeChange(before, content));
+    return `Wrote ${p} (${content.split("\n").length} lines, ${changeStat(c)}).`;
   }
 }
 
@@ -217,11 +243,15 @@ class EditFileTool extends SafeTool<z.infer<typeof editFileArgs>> {
   protected async run({ path: p, old_string, new_string }: z.infer<typeof editFileArgs>) {
     this.requireAct();
     const abs = resolveSafe(p);
-    const parts = fs.readFileSync(abs, "utf8").split(old_string);
+    const before = fs.readFileSync(abs, "utf8");
+    const parts = before.split(old_string);
     if (parts.length === 1) throw new Error(`old_string not found in ${p}.`);
     if (parts.length > 2) throw new Error(`old_string appears ${parts.length - 1} times in ${p}; add context to make it unique.`);
     fs.writeFileSync(abs, parts.join(new_string));
-    return `Edited ${p}.`;
+    // The change is the tool's own arguments: old_string came out, new_string went in.
+    // parts[0] is everything before the match, so its line count locates the edit.
+    const c = report(`edit_file ${p}:${lineOf(parts[0] as string)}`, describeChange(old_string, new_string));
+    return `Edited ${p} (${changeStat(c)}).`;
   }
 }
 

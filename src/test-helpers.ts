@@ -6,6 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { Progress } from "./progress.js";
+import { defaultModels } from "./providers.js";
 import {
   CWD,
   DEFAULT_PRICING,
@@ -19,7 +20,7 @@ import {
 export function fakeConfig(over: Partial<Config> = {}): Config {
   return {
     provider: "anthropic",
-    model: "claude-opus-5",
+    models: defaultModels(),
     summaryModel: null,
     vertexProject: null,
     vertexRegion: "us-east5",
@@ -56,16 +57,46 @@ export function fakeSession(over: Partial<Session> = {}): Session {
 }
 
 /** Installs a fresh module-scope tool context and returns it, so a test can flip
- *  `mode` or `interrupt.requested` and have the tools see the change. */
-export function useContext(over: { cfg?: Partial<Config>; session?: Partial<Session> } = {}): Ctx {
+ *  `mode` or `interrupt.requested` and have the tools see the change. Progress is
+ *  silent unless a test passes its own: most assert on tool output, not narration. */
+export function useContext(
+  over: { cfg?: Partial<Config>; session?: Partial<Session>; progress?: Progress } = {},
+): Ctx {
   const ctx: Ctx = {
     cfg: fakeConfig(over.cfg),
     session: fakeSession(over.session),
-    progress: new Progress(false), // silent: tests assert on tool output, not narration
+    progress: over.progress ?? new Progress(false),
     interrupt: { requested: false, hard: false },
   };
   setContext(ctx);
   return ctx;
+}
+
+/** Run `fn` with stderr captured, and return everything written to it. Progress writes
+ *  there, so this is how a test reads what the user would have seen. */
+export function captureStderr(fn: () => Promise<void>): Promise<string>;
+export function captureStderr(fn: () => void): string;
+export function captureStderr(fn: () => void | Promise<void>): string | Promise<string> {
+  const original = process.stderr.write.bind(process.stderr);
+  let out = "";
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    out += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString();
+    return true;
+  }) as typeof process.stderr.write;
+  const restore = (): string => {
+    process.stderr.write = original;
+    return out;
+  };
+  try {
+    const result = fn();
+    // Restore inside the promise chain too, so an async caller does not lose stderr
+    // for every other test that runs while this one is awaiting.
+    if (result instanceof Promise) return result.then(restore, (err) => (restore(), Promise.reject(err)));
+  } catch (err) {
+    restore();
+    throw err;
+  }
+  return restore();
 }
 
 /** The tools resolve every path against CWD, so scratch files have to live inside the

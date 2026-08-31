@@ -3,6 +3,7 @@ import path from "node:path";
 import test, { describe } from "node:test";
 
 import { CWD, MAX_TOOL_OUTPUT, cap, ctx, priceFor, resolveSafe, zeroUsage } from "./context.js";
+import { defaultModels } from "./providers.js";
 import { fakeConfig, useContext } from "./test-helpers.js";
 
 describe("resolveSafe", () => {
@@ -121,6 +122,14 @@ describe("priceFor", () => {
   });
 
   test("returns nothing for a model no table knows", () => {
-    assert.equal(priceFor(fakeConfig(), "deepseek", "deepseek-v4-pro"), undefined);
+    assert.equal(priceFor(fakeConfig(), "deepseek", "deepseek-v9-unreleased"), undefined);
+  });
+
+  test("prices the stock model of every provider", () => {
+    // An unpriced default would report every turn as "$0.0000+ (some models unpriced)".
+    const cfg = fakeConfig();
+    for (const [provider, model] of Object.entries(defaultModels())) {
+      assert.ok(priceFor(cfg, provider, model), `${provider}/${model} has no price`);
+    }
   });
 });

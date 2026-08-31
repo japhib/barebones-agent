@@ -16,7 +16,7 @@ import { parseArgs } from "node:util";
 
 import { compactHistory, repairDangling } from "./compact.js";
 import { Progress, dim } from "./progress.js";
-import { PROVIDERS, createClient, providerSpec, summaryModel } from "./providers.js";
+import { PROVIDERS, createClient, defaultModels, modelFor, providerSpec, summaryModel } from "./providers.js";
 import { INTERRUPT_HALT, TOOLS } from "./tools.js";
 import {
   APP_DIR,
@@ -62,7 +62,7 @@ const READY_MARKER = "<!-- !act -->";
 
 const DEFAULT_CONFIG: Config = {
   provider: "anthropic",
-  model: "claude-opus-5",
+  models: defaultModels(),
   summaryModel: null,
   vertexProject: null,
   vertexRegion: "us-east5",
@@ -93,11 +93,43 @@ function have(cmd: string): boolean {
 /** Config keys where null is a meaningful value rather than "leave the default". */
 const NULLABLE = new Set(["tavilyApiKey", "summaryModel", "vertexProject"]);
 
+/**
+ * A parsed config file laid over the defaults.
+ *
+ * Split out from the file handling so the layering rules — which keys merge, which
+ * accept null, what happens to a key nobody recognises — can be exercised directly.
+ * `warn` is a parameter for the same reason.
+ */
+export function mergeConfig(
+  raw: Record<string, unknown>,
+  warn: (msg: string) => void = (m) => process.stderr.write(`${m}\n`),
+): Config {
+  const cfg = { ...DEFAULT_CONFIG };
+  for (const [k, v] of Object.entries(raw)) {
+    // Warn rather than throw, so a stale key never bricks a run.
+    if (!(k in DEFAULT_CONFIG)) {
+      if (k !== "model") warn(`warning: unknown config key "${k}" in ${CONFIG_PATH}`);
+      continue;
+    }
+    if (v !== null || NULLABLE.has(k)) (cfg as Record<string, unknown>)[k] = v;
+  }
+  // Both merge per key, so overriding one model's rate — or one provider's model —
+  // does not drop every other entry. Merging also un-aliases them from DEFAULT_CONFIG,
+  // which a shallow spread would otherwise share.
+  cfg.pricing = { ...DEFAULT_PRICING, ...(raw.pricing as Config["pricing"] | undefined) };
+  cfg.models = { ...DEFAULT_CONFIG.models, ...(raw.models as Config["models"] | undefined) };
+  // "model" predates per-provider models and named one id for whichever provider the
+  // config already selected. Honoured as that provider's entry rather than warned
+  // about, so an older config keeps running the model it asks for.
+  if (typeof raw.model === "string" && raw.models === undefined) cfg.models[cfg.provider] = raw.model;
+  return cfg;
+}
+
 function loadConfig(): Config {
   fs.mkdirSync(APP_DIR, { recursive: true });
   if (!fs.existsSync(CONFIG_PATH)) {
     fs.writeFileSync(CONFIG_PATH, `${JSON.stringify(DEFAULT_CONFIG, null, 2)}\n`);
-    return { ...DEFAULT_CONFIG };
+    return mergeConfig({});
   }
   let raw: Record<string, unknown>;
   try {
@@ -105,18 +137,7 @@ function loadConfig(): Config {
   } catch (err) {
     die(`Could not parse ${CONFIG_PATH}: ${err instanceof Error ? err.message : String(err)}`);
   }
-  const cfg = { ...DEFAULT_CONFIG };
-  for (const [k, v] of Object.entries(raw)) {
-    // Warn rather than throw, so a stale key never bricks a run.
-    if (!(k in DEFAULT_CONFIG)) {
-      process.stderr.write(`warning: unknown config key "${k}" in ${CONFIG_PATH}\n`);
-      continue;
-    }
-    if (v !== null || NULLABLE.has(k)) (cfg as Record<string, unknown>)[k] = v;
-  }
-  // Merge per model, so overriding one rate doesn't drop every other model's.
-  cfg.pricing = { ...DEFAULT_PRICING, ...(raw.pricing as Config["pricing"] | undefined) };
-  return cfg;
+  return mergeConfig(raw);
 }
 
 export function resolveEditor(cliEditor: string | undefined, cfg: Config): string[] {
@@ -420,6 +441,13 @@ Tools:
   job: running tests, git, package managers, build steps. Never use it to read, search
   or list files.
 
+When several tool calls do not depend on each other — three files to read, a read and a
+search, two directories to list — make them all in one message rather than one per turn.
+They run together and every result comes back at once. Only let a call wait when it
+genuinely needs an earlier result to decide its arguments. Every extra message is
+another round trip to the model, so reading six files one at a time is five round trips
+slower than reading them together.
+
 Every path you touch must be inside the current directory.
 
 Start by orienting yourself with list_tree or search_code rather than assuming a layout.
@@ -521,6 +549,30 @@ export function formatUsage(label: string, u: Usage, reportsCache = true): strin
     `${n(u.input)} fresh)  out ${n(u.output)}  ·  ${hit}% cached, ` +
     `${requests}  ·  ${cost}`
   );
+}
+
+/**
+ * The model's own commentary since `from`, as lines to narrate.
+ *
+ * `from` matters: a resumed session hands `chat` its entire history before the turn
+ * starts, so a scan that always began at zero would replay every answer the session
+ * has ever given the moment the first tool call fired. Opening at the restored length
+ * means only what the model writes during *this* turn is new. `next` is the high-water
+ * mark to pass back in.
+ */
+export function newNarration(
+  history: readonly Message[],
+  from: number,
+): { lines: string[]; next: number } {
+  const lines: string[] = [];
+  for (let i = Math.max(0, from); i < history.length; i++) {
+    const m = history[i];
+    if (m?.role !== "assistant") continue;
+    const text = String(m.content ?? "").trim();
+    // Only the opening lines: a long answer belongs in the transcript, not the spinner.
+    if (text) lines.push(text.split("\n").slice(0, 4).join("\n"));
+  }
+  return { lines, next: history.length };
 }
 
 /**
@@ -757,9 +809,7 @@ async function main(): Promise<void> {
   if (!(provider in PROVIDERS)) {
     die(`Unknown provider "${provider}". Known: ${Object.keys(PROVIDERS).join(", ")}.`);
   }
-  // cfg.model belongs to cfg.provider, so asking for a different provider on the command
-  // line without naming a model means that provider's default, not the configured one.
-  const model = values.model || (values.provider ? providerSpec(provider).defaultModel : cfg.model);
+  const model = values.model || modelFor(cfg, provider);
   const session = values.session ? loadSession(cfg, values.session) : newSession(provider, model, mode);
   // A session's history is written in one provider's dialect, so --provider on a resume
   // is a mistake worth naming rather than a switch to honour.
@@ -910,20 +960,18 @@ async function main(): Promise<void> {
   // Progress. By the time onToolCallStart fires, the assistant message that requested
   // the call — including any text it wrote first — is already in chat.history, so the
   // model's own running commentary can be surfaced rather than just tool names.
-  let narrated = 0;
+  // Opened at what the session restored, not at zero: everything already in `history`
+  // was narrated on the turn that produced it, and printing it again would replay the
+  // whole session to stderr on every resume.
+  let narrated = chat.history.length;
   let outstanding = 0;
   /** Labels for what this turn did, kept for the transcript if it gets interrupted. */
   const calls: string[] = [];
 
   const narrate = (): void => {
-    const history = chat.history;
-    for (let i = narrated; i < history.length; i++) {
-      const m = history[i];
-      if (m?.role !== "assistant") continue;
-      const text = String(m.content ?? "").trim();
-      if (text) progress.line(dim(text.split("\n").slice(0, 4).join("\n")));
-    }
-    narrated = history.length;
+    const { lines, next } = newNarration(chat.history, narrated);
+    for (const line of lines) progress.line(dim(line));
+    narrated = next;
   };
 
   chat
