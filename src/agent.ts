@@ -617,11 +617,12 @@ export function explainFailure(err: unknown, cfg: Config): string {
 }
 
 function invocation(): string {
-  const argv1 = process.argv[1] ?? "";
-  if (path.basename(argv1) === "bba") return "bba";
-  const rel = path.relative(CWD, argv1);
-  // Relative only while it stays inside the project; otherwise it is a wall of "../".
-  return `node ${rel && !rel.startsWith("..") ? rel : argv1}`;
+  return 'bba';
+  // const argv1 = process.argv[1] ?? "";
+  // if (path.basename(argv1) === "bba") return "bba";
+  // const rel = path.relative(CWD, argv1);
+  // // Relative only while it stays inside the project; otherwise it is a wall of "../".
+  // return `node ${rel && !rel.startsWith("..") ? rel : argv1}`;
 }
 
 function render(md: string, cfg: Config): void {
