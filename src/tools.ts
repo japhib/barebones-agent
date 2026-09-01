@@ -517,14 +517,23 @@ class RunBashTool extends SafeTool<z.infer<typeof runBashArgs>> {
   }
 }
 
-const gitStatusArgs = z.object({});
+const gitStatusArgs = z.object({
+  workingDirectory: z.string().optional().describe("Subdirectory to run the command in (relative to project root). Use this instead of `cd dir &&` prefix."),
+});
 class GitStatusTool extends SafeTool<z.infer<typeof gitStatusArgs>> {
   name = "git_status";
   description = "Show the working directory status: modified, staged, and untracked files.";
   schema = gitStatusArgs;
-  protected async run(_args: z.infer<typeof gitStatusArgs>) {
+  protected async run({ workingDirectory }: z.infer<typeof gitStatusArgs>) {
+    let cwd = CWD;
+    if (workingDirectory) {
+      cwd = resolveSafe(workingDirectory);
+      if (!fs.statSync(cwd).isDirectory()) {
+        throw new Error(`workingDirectory "${workingDirectory}" is not a directory.`);
+      }
+    }
     try {
-      const out = execFileSync("git", ["status", "--porcelain"], { encoding: "utf8", cwd: CWD });
+      const out = execFileSync("git", ["status", "--porcelain"], { encoding: "utf8", cwd });
       return out.trim() ? cap(out) : "Working directory is clean.";
     } catch (err) {
       const e = err as { status?: number; code?: string; stderr?: Buffer };
@@ -539,12 +548,20 @@ const gitLogArgs = z.object({
   patch: z.boolean().optional().describe("Include diff for each commit (default false)"),
   path: z.string().optional().describe("Optional file or directory to scope log to"),
   ref: z.string().optional().describe("Ref/branch to show log for (default HEAD)"),
+  workingDirectory: z.string().optional().describe("Subdirectory to run the command in (relative to project root). Use this instead of `cd dir &&` prefix."),
 });
 class GitLogTool extends SafeTool<z.infer<typeof gitLogArgs>> {
   name = "git_log";
   description = "Show commit history with optional patches. Use patch=true to see what changed in commits.";
   schema = gitLogArgs;
-  protected async run({ limit, patch = false, path: p, ref }: z.infer<typeof gitLogArgs>) {
+  protected async run({ limit, patch = false, path: p, ref, workingDirectory }: z.infer<typeof gitLogArgs>) {
+    let cwd = CWD;
+    if (workingDirectory) {
+      cwd = resolveSafe(workingDirectory);
+      if (!fs.statSync(cwd).isDirectory()) {
+        throw new Error(`workingDirectory "${workingDirectory}" is not a directory.`);
+      }
+    }
     const defaultLimit = patch ? 1 : 10;
     const args = ["log", "--oneline"];
     if (patch) args.push("--patch");
@@ -552,7 +569,7 @@ class GitLogTool extends SafeTool<z.infer<typeof gitLogArgs>> {
     if (ref) args.push(ref);
     if (p) args.push("--", p);
     try {
-      const out = execFileSync("git", args, { encoding: "utf8", cwd: CWD, maxBuffer: 16 * 1024 * 1024 });
+      const out = execFileSync("git", args, { encoding: "utf8", cwd, maxBuffer: 16 * 1024 * 1024 });
       return out.trim() ? cap(out) : "No commits found.";
     } catch (err) {
       const e = err as { status?: number; code?: string; stderr?: Buffer };
@@ -566,17 +583,18 @@ const gitMergeBaseArgs = z.object({
   ref1: z.string().optional().describe("First ref/branch (default HEAD)"),
   ref2: z.string().optional().describe("Second ref/branch (required unless autoDetectMain is true)"),
   autoDetectMain: z.boolean().optional().describe("Auto-detect main branch as ref2 (tries origin/main, origin/master, main, master)"),
+  workingDirectory: z.string().optional().describe("Subdirectory to run the command in (relative to project root). Use this instead of `cd dir &&` prefix."),
 });
 class GitMergeBaseTool extends SafeTool<z.infer<typeof gitMergeBaseArgs>> {
   name = "git_merge_base";
   description = "Find the common ancestor commit between two refs. Useful for finding where a branch diverged from main.";
   schema = gitMergeBaseArgs;
   
-  private detectMainBranch(): string | null {
+  private detectMainBranch(cwd: string): string | null {
     const candidates = ["origin/main", "origin/master", "main", "master"];
     for (const branch of candidates) {
       try {
-        execFileSync("git", ["rev-parse", "--verify", branch], { encoding: "utf8", cwd: CWD, stdio: "pipe" });
+        execFileSync("git", ["rev-parse", "--verify", branch], { encoding: "utf8", cwd, stdio: "pipe" });
         return branch;
       } catch {
         continue;
@@ -585,15 +603,22 @@ class GitMergeBaseTool extends SafeTool<z.infer<typeof gitMergeBaseArgs>> {
     return null;
   }
 
-  protected async run({ ref1 = "HEAD", ref2, autoDetectMain = true }: z.infer<typeof gitMergeBaseArgs>) {
+  protected async run({ ref1 = "HEAD", ref2, autoDetectMain = true, workingDirectory }: z.infer<typeof gitMergeBaseArgs>) {
+    let cwd = CWD;
+    if (workingDirectory) {
+      cwd = resolveSafe(workingDirectory);
+      if (!fs.statSync(cwd).isDirectory()) {
+        throw new Error(`workingDirectory "${workingDirectory}" is not a directory.`);
+      }
+    }
     let target = ref2;
     if (!target) {
       if (!autoDetectMain) throw new Error("ref2 is required when autoDetectMain is false.");
-      target = this.detectMainBranch();
+      target = this.detectMainBranch(cwd);
       if (!target) throw new Error("Could not auto-detect main branch. Tried: origin/main, origin/master, main, master.");
     }
     try {
-      const out = execFileSync("git", ["merge-base", ref1, target], { encoding: "utf8", cwd: CWD });
+      const out = execFileSync("git", ["merge-base", ref1, target], { encoding: "utf8", cwd });
       return out.trim();
     } catch (err) {
       const e = err as { status?: number; code?: string; stderr?: Buffer };
@@ -609,12 +634,20 @@ const gitDiffArgs = z.object({
   path: z.string().optional().describe("Optional file or directory to scope diff to"),
   stat: z.boolean().optional().describe("Show only file stats instead of full diff (default false)"),
   cached: z.boolean().optional().describe("Show staged changes (default false)"),
+  workingDirectory: z.string().optional().describe("Subdirectory to run the command in (relative to project root). Use this instead of `cd dir &&` prefix."),
 });
 class GitDiffTool extends SafeTool<z.infer<typeof gitDiffArgs>> {
   name = "git_diff";
   description = "Show differences between refs, commits, or working directory. Can compare any two commits/branches or show working directory changes.";
   schema = gitDiffArgs;
-  protected async run({ ref1, ref2, path: p, stat = false, cached = false }: z.infer<typeof gitDiffArgs>) {
+  protected async run({ ref1, ref2, path: p, stat = false, cached = false, workingDirectory }: z.infer<typeof gitDiffArgs>) {
+    let cwd = CWD;
+    if (workingDirectory) {
+      cwd = resolveSafe(workingDirectory);
+      if (!fs.statSync(cwd).isDirectory()) {
+        throw new Error(`workingDirectory "${workingDirectory}" is not a directory.`);
+      }
+    }
     const args = ["diff"];
     if (stat) args.push("--stat");
     if (cached) args.push("--cached");
@@ -622,7 +655,7 @@ class GitDiffTool extends SafeTool<z.infer<typeof gitDiffArgs>> {
     if (ref2) args.push(ref2);
     if (p) args.push("--", p);
     try {
-      const out = execFileSync("git", args, { encoding: "utf8", cwd: CWD, maxBuffer: 16 * 1024 * 1024 });
+      const out = execFileSync("git", args, { encoding: "utf8", cwd, maxBuffer: 16 * 1024 * 1024 });
       return out.trim() ? cap(out) : "No differences.";
     } catch (err) {
       const e = err as { status?: number; code?: string; stderr?: Buffer };

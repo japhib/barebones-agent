@@ -229,19 +229,23 @@ transcript mid-turn wastes context and muddles the history it is building.)
 The agent has direct access to git information without needing `run_bash`:
 
 - **`git_status`** — working directory status (modified, staged, untracked files)
+  - `workingDirectory`: run in a subdirectory (optional)
 - **`git_log`** — commit history with optional diffs
   - `limit`: number of commits (default 10, or 1 if `patch=true`)
   - `patch`: include full diffs for each commit
   - `path`: scope to specific file/directory
   - `ref`: show log for a specific branch/ref
+  - `workingDirectory`: run in a subdirectory (optional)
 - **`git_merge_base`** — find common ancestor between refs
   - Auto-detects main branch (tries `origin/main`, `origin/master`, `main`, `master`)
   - Useful for finding where a branch diverged
+  - `workingDirectory`: run in a subdirectory (optional)
 - **`git_diff`** — show differences between refs or working directory
   - `ref1`, `ref2`: compare any two commits/branches
   - `path`: scope to specific file/directory
   - `stat`: show only file statistics instead of full diff
   - `cached`: show staged changes
+  - `workingDirectory`: run in a subdirectory (optional)
 
 **Typical workflow** to see changes in current branch vs main:
 ```

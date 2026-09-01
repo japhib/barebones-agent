@@ -695,6 +695,47 @@ describe("git tools", () => {
     const badDiff = await tool("git_diff").execute({ ref1: "nonexistent-ref-xyz" });
     assert.match(String(badDiff), /Error:/);
   });
+
+  test("git tools support workingDirectory parameter", async () => {
+    useContext({ session: { mode: "act" } });
+    const dir = tmpDir("git-workdir");
+    writeTmp(`${dir}/file.txt`, "test content");
+    
+    // git_status with workingDirectory
+    const status = await tool("git_status").execute({ workingDirectory: dir });
+    assert.ok(typeof status === "string");
+    
+    // git_log with workingDirectory - should work even in non-git directory
+    const log = await tool("git_log").execute({ workingDirectory: "src" });
+    assert.ok(typeof log === "string");
+    
+    // git_diff with workingDirectory
+    const diff = await tool("git_diff").execute({ workingDirectory: "src" });
+    assert.ok(typeof diff === "string");
+    
+    // git_merge_base with workingDirectory
+    const mergeBase = await tool("git_merge_base").execute({ 
+      ref1: "HEAD",
+      ref2: "HEAD~1", 
+      autoDetectMain: false,
+      workingDirectory: "src"
+    });
+    assert.ok(typeof mergeBase === "string");
+  });
+
+  test("git tools reject invalid workingDirectory", async () => {
+    useContext({ session: { mode: "act" } });
+    
+    // Non-existent directory
+    const badDir = await tool("git_status").execute({ workingDirectory: "../outside" });
+    assert.match(String(badDir), /Error:.*outside/);
+    
+    // File instead of directory
+    const dir = tmpDir("git-baddir");
+    const file = writeTmp(`${dir}/notadir.txt`, "x");
+    const notDir = await tool("git_log").execute({ workingDirectory: file });
+    assert.match(String(notDir), /Error:.*not a directory/);
+  });
 });
 
 // Clean up the scratch directory the file-based tools used, so a later run starts fresh.
