@@ -517,14 +517,74 @@ class RunBashTool extends SafeTool<z.infer<typeof runBashArgs>> {
   }
 }
 
+/**
+ * Execute a git command with optional stderr capture.
+ * 
+ * When showStderr is false (default), stderr is suppressed to reduce noise.
+ * When showStderr is true, stderr is captured and appended to stdout with a separator.
+ * 
+ * @param args - Git command arguments (e.g. ["status", "--porcelain"])
+ * @param cwd - Working directory for the command
+ * @param showStderr - Whether to capture and include stderr in output
+ * @param emptyMessage - Message to return when output is empty (optional)
+ * @param maxBuffer - Maximum buffer size for stdout/stderr (default 1MB)
+ * @returns Command output, possibly with stderr appended
+ */
+function execGit(
+  args: string[],
+  cwd: string,
+  showStderr: boolean,
+  emptyMessage?: string,
+  maxBuffer = 1024 * 1024
+): string {
+  if (showStderr) {
+    // Use spawnSync to capture both stdout and stderr
+    const result = spawnSync("git", args, { encoding: "utf8", cwd, maxBuffer });
+    if (result.error) {
+      const e = result.error as NodeJS.ErrnoException;
+      if (e.code === "ENOENT") throw new Error("git not found — ensure git is installed.");
+      throw new Error(e.message);
+    }
+    if (result.status !== 0) {
+      const stdout = result.stdout?.trim() || "";
+      const stderr = result.stderr?.trim() || "";
+      const combined = stdout ? `${stdout}\n--- stderr ---\n${stderr}` : stderr;
+      throw new Error(combined || `git exited with status ${result.status}`);
+    }
+    const output = [result.stdout.trim()];
+    if (result.stderr?.trim()) {
+      output.push("--- stderr ---");
+      output.push(result.stderr.trim());
+    }
+    const combined = output.join("\n");
+    return combined || emptyMessage || "";
+  } else {
+    // Default: swallow stderr
+    try {
+      const out = execFileSync("git", args, { 
+        encoding: "utf8", 
+        cwd, 
+        maxBuffer,
+        stdio: ['pipe', 'pipe', 'ignore'] 
+      });
+      return out.trim() || emptyMessage || "";
+    } catch (err) {
+      const e = err as { status?: number; code?: string };
+      if (e.code === "ENOENT") throw new Error("git not found — ensure git is installed.");
+      throw new Error(String(err));
+    }
+  }
+}
+
 const gitStatusArgs = z.object({
   workingDirectory: z.string().optional().describe("Subdirectory to run the command in (relative to project root). Use this instead of `cd dir &&` prefix."),
+  showStderr: z.boolean().optional().describe("Include stderr in output (default false)"),
 });
 class GitStatusTool extends SafeTool<z.infer<typeof gitStatusArgs>> {
   name = "git_status";
   description = "Show the working directory status: modified, staged, and untracked files.";
   schema = gitStatusArgs;
-  protected async run({ workingDirectory }: z.infer<typeof gitStatusArgs>) {
+  protected async run({ workingDirectory, showStderr = false }: z.infer<typeof gitStatusArgs>) {
     let cwd = CWD;
     if (workingDirectory) {
       cwd = resolveSafe(workingDirectory);
@@ -532,14 +592,8 @@ class GitStatusTool extends SafeTool<z.infer<typeof gitStatusArgs>> {
         throw new Error(`workingDirectory "${workingDirectory}" is not a directory.`);
       }
     }
-    try {
-      const out = execFileSync("git", ["status", "--porcelain"], { encoding: "utf8", cwd });
-      return out.trim() ? cap(out) : "Working directory is clean.";
-    } catch (err) {
-      const e = err as { status?: number; code?: string; stderr?: Buffer };
-      if (e.code === "ENOENT") throw new Error("git not found — ensure git is installed.");
-      throw new Error(e.stderr?.toString().trim() || String(err));
-    }
+    const out = execGit(["status", "--porcelain"], cwd, showStderr, "Working directory is clean.");
+    return cap(out);
   }
 }
 
@@ -549,12 +603,13 @@ const gitLogArgs = z.object({
   path: z.string().optional().describe("Optional file or directory to scope log to"),
   ref: z.string().optional().describe("Ref/branch to show log for (default HEAD)"),
   workingDirectory: z.string().optional().describe("Subdirectory to run the command in (relative to project root). Use this instead of `cd dir &&` prefix."),
+  showStderr: z.boolean().optional().describe("Include stderr in output (default false)"),
 });
 class GitLogTool extends SafeTool<z.infer<typeof gitLogArgs>> {
   name = "git_log";
   description = "Show commit history with optional patches. Use patch=true to see what changed in commits.";
   schema = gitLogArgs;
-  protected async run({ limit, patch = false, path: p, ref, workingDirectory }: z.infer<typeof gitLogArgs>) {
+  protected async run({ limit, patch = false, path: p, ref, workingDirectory, showStderr = false }: z.infer<typeof gitLogArgs>) {
     let cwd = CWD;
     if (workingDirectory) {
       cwd = resolveSafe(workingDirectory);
@@ -568,14 +623,8 @@ class GitLogTool extends SafeTool<z.infer<typeof gitLogArgs>> {
     args.push("-n", String(limit ?? defaultLimit));
     if (ref) args.push(ref);
     if (p) args.push("--", p);
-    try {
-      const out = execFileSync("git", args, { encoding: "utf8", cwd, maxBuffer: 16 * 1024 * 1024 });
-      return out.trim() ? cap(out) : "No commits found.";
-    } catch (err) {
-      const e = err as { status?: number; code?: string; stderr?: Buffer };
-      if (e.code === "ENOENT") throw new Error("git not found — ensure git is installed.");
-      throw new Error(e.stderr?.toString().trim() || String(err));
-    }
+    const out = execGit(args, cwd, showStderr, "No commits found.", 16 * 1024 * 1024);
+    return cap(out);
   }
 }
 
@@ -584,6 +633,7 @@ const gitMergeBaseArgs = z.object({
   ref2: z.string().optional().describe("Second ref/branch (required unless autoDetectMain is true)"),
   autoDetectMain: z.boolean().optional().describe("Auto-detect main branch as ref2 (tries origin/main, origin/master, main, master)"),
   workingDirectory: z.string().optional().describe("Subdirectory to run the command in (relative to project root). Use this instead of `cd dir &&` prefix."),
+  showStderr: z.boolean().optional().describe("Include stderr in output (default false)"),
 });
 class GitMergeBaseTool extends SafeTool<z.infer<typeof gitMergeBaseArgs>> {
   name = "git_merge_base";
@@ -603,7 +653,7 @@ class GitMergeBaseTool extends SafeTool<z.infer<typeof gitMergeBaseArgs>> {
     return null;
   }
 
-  protected async run({ ref1 = "HEAD", ref2, autoDetectMain = true, workingDirectory }: z.infer<typeof gitMergeBaseArgs>) {
+  protected async run({ ref1 = "HEAD", ref2, autoDetectMain = true, workingDirectory, showStderr = false }: z.infer<typeof gitMergeBaseArgs>) {
     let cwd = CWD;
     if (workingDirectory) {
       cwd = resolveSafe(workingDirectory);
@@ -617,14 +667,7 @@ class GitMergeBaseTool extends SafeTool<z.infer<typeof gitMergeBaseArgs>> {
       target = this.detectMainBranch(cwd);
       if (!target) throw new Error("Could not auto-detect main branch. Tried: origin/main, origin/master, main, master.");
     }
-    try {
-      const out = execFileSync("git", ["merge-base", ref1, target], { encoding: "utf8", cwd });
-      return out.trim();
-    } catch (err) {
-      const e = err as { status?: number; code?: string; stderr?: Buffer };
-      if (e.code === "ENOENT") throw new Error("git not found — ensure git is installed.");
-      throw new Error(e.stderr?.toString().trim() || String(err));
-    }
+    return execGit(["merge-base", ref1, target], cwd, showStderr);
   }
 }
 
@@ -635,12 +678,13 @@ const gitDiffArgs = z.object({
   stat: z.boolean().optional().describe("Show only file stats instead of full diff (default false)"),
   cached: z.boolean().optional().describe("Show staged changes (default false)"),
   workingDirectory: z.string().optional().describe("Subdirectory to run the command in (relative to project root). Use this instead of `cd dir &&` prefix."),
+  showStderr: z.boolean().optional().describe("Include stderr in output (default false)"),
 });
 class GitDiffTool extends SafeTool<z.infer<typeof gitDiffArgs>> {
   name = "git_diff";
   description = "Show differences between refs, commits, or working directory. Can compare any two commits/branches or show working directory changes.";
   schema = gitDiffArgs;
-  protected async run({ ref1, ref2, path: p, stat = false, cached = false, workingDirectory }: z.infer<typeof gitDiffArgs>) {
+  protected async run({ ref1, ref2, path: p, stat = false, cached = false, workingDirectory, showStderr = false }: z.infer<typeof gitDiffArgs>) {
     let cwd = CWD;
     if (workingDirectory) {
       cwd = resolveSafe(workingDirectory);
@@ -654,14 +698,8 @@ class GitDiffTool extends SafeTool<z.infer<typeof gitDiffArgs>> {
     if (ref1) args.push(ref1);
     if (ref2) args.push(ref2);
     if (p) args.push("--", p);
-    try {
-      const out = execFileSync("git", args, { encoding: "utf8", cwd, maxBuffer: 16 * 1024 * 1024 });
-      return out.trim() ? cap(out) : "No differences.";
-    } catch (err) {
-      const e = err as { status?: number; code?: string; stderr?: Buffer };
-      if (e.code === "ENOENT") throw new Error("git not found — ensure git is installed.");
-      throw new Error(e.stderr?.toString().trim() || String(err));
-    }
+    const out = execGit(args, cwd, showStderr, "No differences.", 16 * 1024 * 1024);
+    return cap(out);
   }
 }
 

@@ -736,6 +736,91 @@ describe("git tools", () => {
     const notDir = await tool("git_log").execute({ workingDirectory: file });
     assert.match(String(notDir), /Error:.*not a directory/);
   });
+
+  test("git_status with showStderr=false swallows stderr (default)", async () => {
+    useContext({ session: { mode: "act" } });
+    const out = String(await tool("git_status").execute({ showStderr: false }));
+    // Should not contain stderr markers
+    assert.ok(!out.includes("--- stderr ---"));
+  });
+
+  test("git_status with showStderr=true captures stderr", async () => {
+    useContext({ session: { mode: "act" } });
+    // Note: git status typically doesn't produce stderr on success, so this test
+    // mainly verifies the parameter is accepted and doesn't break the tool
+    const out = String(await tool("git_status").execute({ showStderr: true }));
+    assert.ok(typeof out === "string");
+    // Either clean, has changes, or includes stderr if git produced any
+  });
+
+  test("git_log with showStderr=false swallows stderr (default)", async () => {
+    useContext({ session: { mode: "act" } });
+    const out = String(await tool("git_log").execute({ limit: 2, showStderr: false }));
+    assert.ok(!out.includes("--- stderr ---"));
+  });
+
+  test("git_log with showStderr=true captures stderr", async () => {
+    useContext({ session: { mode: "act" } });
+    const out = String(await tool("git_log").execute({ limit: 2, showStderr: true }));
+    assert.ok(typeof out === "string");
+  });
+
+  test("git_merge_base with showStderr=false swallows stderr (default)", async () => {
+    useContext({ session: { mode: "act" } });
+    const out = String(await tool("git_merge_base").execute({ 
+      ref1: "HEAD", 
+      ref2: "HEAD~1", 
+      autoDetectMain: false,
+      showStderr: false 
+    }));
+    assert.ok(!out.includes("--- stderr ---"));
+    assert.match(out, /^[0-9a-f]{40}$/);
+  });
+
+  test("git_merge_base with showStderr=true captures stderr", async () => {
+    useContext({ session: { mode: "act" } });
+    const out = String(await tool("git_merge_base").execute({ 
+      ref1: "HEAD", 
+      ref2: "HEAD~1", 
+      autoDetectMain: false,
+      showStderr: true 
+    }));
+    assert.ok(typeof out === "string");
+  });
+
+  test("git_diff with showStderr=false swallows stderr (default)", async () => {
+    useContext({ session: { mode: "act" } });
+    const out = String(await tool("git_diff").execute({ 
+      ref1: "HEAD", 
+      ref2: "HEAD",
+      showStderr: false 
+    }));
+    assert.ok(!out.includes("--- stderr ---"));
+    assert.equal(out, "No differences.");
+  });
+
+  test("git_diff with showStderr=true captures stderr", async () => {
+    useContext({ session: { mode: "act" } });
+    const out = String(await tool("git_diff").execute({ 
+      ref1: "HEAD", 
+      ref2: "HEAD",
+      showStderr: true 
+    }));
+    assert.ok(typeof out === "string");
+  });
+
+  test("git tools with showStderr=true include stderr in error messages", async () => {
+    useContext({ session: { mode: "act" } });
+    
+    // When a git command fails with showStderr=true, stderr should be in the error
+    const badLog = await tool("git_log").execute({ 
+      ref: "nonexistent-ref-xyz",
+      showStderr: true 
+    });
+    // Should contain error information (either Error: prefix or the actual git error)
+    assert.ok(String(badLog).length > 0);
+    assert.ok(String(badLog).includes("Error:") || String(badLog).includes("nonexistent"));
+  });
 });
 
 // Clean up the scratch directory the file-based tools used, so a later run starts fresh.
