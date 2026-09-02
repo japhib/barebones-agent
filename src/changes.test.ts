@@ -95,6 +95,48 @@ describe("paintChange", () => {
     assert.ok(!out.includes("+0"), "a no-op should not advertise a stat");
   });
 
+  test("unchanged lines are shown in white without +/- prefix", () => {
+    const before = "line1\nline2\nline3";
+    const after = "line1\nline2 modified\nline3";
+    const lines = body("edit_file a.ts:1", before, after);
+    
+    assert.equal(lines[0], "line1", "first line unchanged, no prefix");
+    assert.equal(lines[1], "-line2", "old version with - prefix");
+    assert.equal(lines[2], "+line2 modified", "new version with + prefix");
+    assert.equal(lines[3], "line3", "last line unchanged, no prefix");
+  });
+
+  test("all lines unchanged shows them without color or prefix", () => {
+    const text = "line1\nline2\nline3";
+    const lines = body("edit_file a.ts:1", text, text);
+    // When all lines are unchanged, the change is detected as "no change"
+    assert.deepEqual(lines, [], "identical text shows as no change");
+  });
+
+  test("interleaved changes and unchanged lines", () => {
+    const before = "a\nb\nc\nd\ne";
+    const after = "a\nB\nc\nD\ne";
+    const lines = body("edit_file a.ts:1", before, after);
+    
+    assert.equal(lines[0], "a");
+    assert.equal(lines[1], "-b");
+    assert.equal(lines[2], "+B");
+    assert.equal(lines[3], "c");
+    assert.equal(lines[4], "-d");
+    assert.equal(lines[5], "+D");
+    assert.equal(lines[6], "e");
+  });
+
+  test("only removals shows all in red", () => {
+    const lines = body("edit_file a.ts:1", "removed1\nremoved2", "");
+    assert.deepEqual(lines, ["-removed1", "-removed2"]);
+  });
+
+  test("only additions shows all in green", () => {
+    const lines = body("edit_file a.ts:1", "", "added1\nadded2");
+    assert.deepEqual(lines, ["+added1", "+added2"]);
+  });
+
   describe("the display cap", () => {
     test("holds back the overflow and says how much", () => {
       const shown = body("write_file big.ts", "", "x\n".repeat(500), 10);

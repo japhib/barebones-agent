@@ -22,6 +22,64 @@ export interface Change {
   added: string[];
 }
 
+/** A line in a diff, either unchanged, removed, or added. */
+interface DiffLine {
+  kind: "unchanged" | "removed" | "added";
+  text: string;
+}
+
+/**
+ * Compute a simple diff between removed and added lines.
+ * 
+ * Uses a basic longest common subsequence approach to identify unchanged lines.
+ * Lines that appear in both removed and added in the same order are marked as
+ * unchanged; others are marked as removed or added.
+ */
+function computeDiff(removed: string[], added: string[]): DiffLine[] {
+  if (removed.length === 0) {
+    return added.map((text) => ({ kind: "added" as const, text }));
+  }
+  if (added.length === 0) {
+    return removed.map((text) => ({ kind: "removed" as const, text }));
+  }
+
+  // Build LCS table
+  const m = removed.length;
+  const n = added.length;
+  const lcs: number[][] = Array(m + 1).fill(0).map(() => Array(n + 1).fill(0));
+
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      if (removed[i - 1] === added[j - 1]) {
+        lcs[i][j] = lcs[i - 1][j - 1] + 1;
+      } else {
+        lcs[i][j] = Math.max(lcs[i - 1][j], lcs[i][j - 1]);
+      }
+    }
+  }
+
+  // Backtrack to build the diff
+  const result: DiffLine[] = [];
+  let i = m;
+  let j = n;
+
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && removed[i - 1] === added[j - 1]) {
+      result.unshift({ kind: "unchanged", text: removed[i - 1] });
+      i--;
+      j--;
+    } else if (j > 0 && (i === 0 || lcs[i][j - 1] >= lcs[i - 1][j])) {
+      result.unshift({ kind: "added", text: added[j - 1] });
+      j--;
+    } else if (i > 0) {
+      result.unshift({ kind: "removed", text: removed[i - 1] });
+      i--;
+    }
+  }
+
+  return result;
+}
+
 /**
  * Split a replaced or inserted span into lines.
  *
@@ -53,8 +111,8 @@ export function changeStat(c: Change): string {
 }
 
 /**
- * A change painted for the terminal: removals in red, additions in green, under a bold
- * label naming what ran, e.g. "edit_file src/agent.ts:42".
+ * A change painted for the terminal: removals in red, additions in green, unchanged
+ * lines in white, under a bold label naming what ran, e.g. "edit_file src/agent.ts:42".
  *
  * `maxLines` bounds the body — a wholesale rewrite belongs in the file, not scrolled
  * past in the terminal. Removals are trimmed first: what a file now says matters more
@@ -63,16 +121,42 @@ export function changeStat(c: Change): string {
 export function paintChange(label: string, c: Change, maxLines = 200): string {
   if (!c.removed.length && !c.added.length) return `  ${BOLD}${label}${RESET} ${DIM}(no change)${RESET}`;
 
-  const over = Math.max(0, c.removed.length + c.added.length - maxLines);
-  const cutRemoved = Math.min(over, c.removed.length);
-  const removed = c.removed.slice(0, c.removed.length - cutRemoved);
-  const added = c.added.slice(0, c.added.length - (over - cutRemoved));
+  // Compute the diff to identify unchanged lines
+  const diffLines = computeDiff(c.removed, c.added);
+
+  // Apply maxLines cap: count by kind, trim removals first
+  if (diffLines.length > maxLines) {
+    const over = diffLines.length - maxLines;
+    const removedCount = diffLines.filter((l) => l.kind === "removed").length;
+    const cutRemoved = Math.min(over, removedCount);
+    
+    let cut = 0;
+    const trimmed: DiffLine[] = [];
+    
+    for (const line of diffLines) {
+      if (line.kind === "removed" && cut < cutRemoved) {
+        cut++;
+        continue;
+      }
+      if (trimmed.length >= maxLines) break;
+      trimmed.push(line);
+    }
+    
+    const head = `  ${BOLD}${label}${RESET} ${GREEN}+${c.added.length}${RESET} ${RED}-${c.removed.length}${RESET}`;
+    const body = trimmed.map((l) => {
+      if (l.kind === "removed") return `  ${RED}-${l.text}${RESET}`;
+      if (l.kind === "added") return `  ${GREEN}+${l.text}${RESET}`;
+      return `  ${l.text}`;
+    });
+    body.push(`  ${DIM}… ${diffLines.length - trimmed.length} more lines not shown${RESET}`);
+    return [head, ...body].join("\n");
+  }
 
   const head = `  ${BOLD}${label}${RESET} ${GREEN}+${c.added.length}${RESET} ${RED}-${c.removed.length}${RESET}`;
-  const body = [
-    ...removed.map((l) => `  ${RED}-${l}${RESET}`),
-    ...added.map((l) => `  ${GREEN}+${l}${RESET}`),
-  ];
-  if (over) body.push(`  ${DIM}… ${over} more lines not shown${RESET}`);
+  const body = diffLines.map((l) => {
+    if (l.kind === "removed") return `  ${RED}-${l.text}${RESET}`;
+    if (l.kind === "added") return `  ${GREEN}+${l.text}${RESET}`;
+    return `  ${l.text}`;
+  });
   return [head, ...body].join("\n");
 }
