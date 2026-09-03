@@ -11,7 +11,7 @@ import { ModelRegistry, createLLM, type Message, type NodeLLMCore } from "@node-
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { parseArgs } from "node:util";
 
 import { repairDangling } from "./history.js";
@@ -69,13 +69,47 @@ const DEFAULT_CONFIG: Config = {
   sessionDir: ".agent",
   requestTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
   bashTimeoutMs: DEFAULT_BASH_TIMEOUT_MS,
+  stopHook: "",
 };
 
 // ---------------------------------------------------------------- helpers
 
+/**
+ * Thrown to exit main() cleanly. The top-level runner catches this, runs the stop hook,
+ * and exits with the given code. This replaces scattered runStopHook + return patterns
+ * with a single exit point.
+ */
+class AgentExit extends Error {
+  constructor(
+    public readonly code: number,
+    public readonly message: string = "",
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * Run the stop hook command if configured. Executed when the program exits to notify
+ * the user (e.g., by playing a sound).
+ */
+function runStopHook(cfg: Config): void {
+  const cmd = cfg.stopHook.trim();
+  if (!cmd) return;
+  try {
+    // Run detached so we don't wait for it or capture output
+    spawn("sh", ["-c", cmd], {
+      stdio: "ignore",
+      detached: true,
+      timeout: 5000, // 5s max for the hook itself
+    });
+  } catch {
+    // ignore it
+  }
+}
+
+/** Exit with an error message. Throws AgentExit to unwind to the top-level handler. */
 function die(msg: string): never {
-  process.stderr.write(`${msg}\n`);
-  process.exit(1);
+  throw new AgentExit(1, msg);
 }
 
 function have(cmd: string): boolean {
@@ -813,7 +847,7 @@ const HELP = `barebones-agent — one turn of work per invocation.
 
 Config: ${CONFIG_PATH}`;
 
-async function main(): Promise<void> {
+async function main(cfg: Config): Promise<void> {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
     options: {
@@ -842,8 +876,6 @@ async function main(): Promise<void> {
     process.stdout.write(`${HELP}\n`);
     return;
   }
-
-  const cfg = loadConfig();
   if (values.timeout) cfg.requestTimeoutMs = Number(values.timeout) * 1000;
   if (values["bash-timeout"]) cfg.bashTimeoutMs = Number(values["bash-timeout"]) * 1000;
 
@@ -1086,7 +1118,7 @@ async function main(): Promise<void> {
       progress.line(dim("✂  cut mid-request"));
     } else {
       progress.stop(); // third press: they want out now, and the turn is already saved
-      process.exit(130);
+      throw new AgentExit(130);
     }
   };
   // Installed only around the model call. A Ctrl-C in the editor or the pager either
@@ -1169,11 +1201,33 @@ async function main(): Promise<void> {
   process.stdout.write(`\n${session.mode} mode · continue with:\n↻  ${resume}${next}\n`);
 }
 
+/**
+ * Top-level runner that wraps main() and ensures the stop hook runs exactly once.
+ * All exit paths — normal return, AgentExit, or unexpected error — go through here.
+ */
+async function run(): Promise<void> {
+  let cfg: Config | undefined;
+  let exitCode = 0;
+  try {
+    cfg = loadConfig();
+    await main(cfg);
+  } catch (err) {
+    if (err instanceof AgentExit) {
+      exitCode = err.code;
+      if (err.message) process.stderr.write(`${err.message}\n`);
+    } else {
+      exitCode = 1;
+      process.stderr.write(`${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);
+    }
+  } finally {
+    if (cfg) runStopHook(cfg);
+  }
+  if (exitCode !== 0) process.exit(exitCode);
+}
+
 // Run as a CLI only when invoked directly (e.g. `node dist/agent.js` or the `bba` bin),
 // not when the module is imported by a unit test.
 const ENTRY = process.argv[1] ?? "";
 if (ENTRY && path.basename(ENTRY) === "agent.js") {
-  main().catch((err: unknown) => {
-    die(err instanceof Error ? (err.stack ?? err.message) : String(err));
-  });
+  run();
 }

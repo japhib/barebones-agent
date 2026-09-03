@@ -61,6 +61,8 @@ export interface Config {
   sessionDir: string;
   requestTimeoutMs: number;
   bashTimeoutMs: number;
+  /** Shell command to run when the program exits (e.g., to play a sound). */
+  stopHook: string;
 }
 
 /** Per-project configuration, stored in .agent/project.json beside the sessions. */

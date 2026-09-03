@@ -57,6 +57,21 @@ describe("mergeConfig", () => {
     assert.equal(cfg.baseUrl, "http://127.0.0.1:8000/v1");
     assert.equal(cfg.apiKeyEnv, "MY_KEY");
   });
+
+  test("stopHook defaults to empty string", () => {
+    const { cfg } = merge({});
+    assert.equal(cfg.stopHook, "");
+  });
+
+  test("stopHook can be set to a command", () => {
+    const { cfg } = merge({ stopHook: "afplay /System/Library/Sounds/Glass.aiff" });
+    assert.equal(cfg.stopHook, "afplay /System/Library/Sounds/Glass.aiff");
+  });
+
+  test("stopHook set to null leaves the default empty string", () => {
+    const { cfg } = merge({ stopHook: null });
+    assert.equal(cfg.stopHook, "");
+  });
 });
 
 describe("newNarration", () => {

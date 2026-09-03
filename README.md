@@ -361,7 +361,8 @@ CLI flag → environment → config file → default.
   "renderer": "auto",
   "sessionDir": ".agent",
   "requestTimeoutMs": 600000,
-  "bashTimeoutMs": 120000
+  "bashTimeoutMs": 120000,
+  "stopHook": ""
 }
 ```
 
@@ -381,6 +382,14 @@ instantly and the agent reads a transcript you have not typed into yet.
 `glow` / `bat` / `none`. Under `auto`, if neither is installed the agent says so once per
 run before printing plain Markdown — set `renderer` explicitly to silence it. The notice
 is skipped when stdout is redirected, since piping already implies you want plain text.
+
+`stopHook` is a shell command that runs when the program exits. Use it to notify yourself
+that the agent has finished and needs input — for example, to play a sound:
+```json
+"stopHook": "afplay /System/Library/Sounds/Glass.aiff"
+```
+The command is run in a detached shell with a 5-second timeout. Hook failures are silently
+ignored so they never break the agent's exit flow. Leave it empty (`""`) to disable.
 
 ### Project configuration
 
