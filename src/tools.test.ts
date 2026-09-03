@@ -29,6 +29,7 @@ describe("all tools", () => {
     assert.deepEqual([...seen].sort(), [
       "delete_file",
       "edit_file",
+      "get_pwd",
       "git_diff",
       "git_log",
       "git_merge_base",
@@ -820,6 +821,20 @@ describe("git tools", () => {
     // Should contain error information (either Error: prefix or the actual git error)
     assert.ok(String(badLog).length > 0);
     assert.ok(String(badLog).includes("Error:") || String(badLog).includes("nonexistent"));
+  });
+});
+
+describe("get_pwd", () => {
+  test("returns the current working directory", async () => {
+    useContext({ session: { mode: "act" } });
+    const out = await tool("get_pwd").execute({});
+    assert.equal(out, process.cwd());
+  });
+
+  test("works in plan mode since it only reads", async () => {
+    useContext({ session: { mode: "plan" } });
+    const out = await tool("get_pwd").execute({});
+    assert.equal(out, process.cwd());
   });
 });
 

@@ -452,7 +452,7 @@ const runBashArgs = z.object({
 class RunBashTool extends SafeTool<z.infer<typeof runBashArgs>> {
   name = "run_bash";
   description =
-    "Run a shell command in the current directory. This ALWAYS requires the user to approve it first, which ends your turn and costs them a round trip. Every other tool runs immediately without asking. Use this only for what no other tool can do: running tests, package managers, build steps. Never use it to read, search or list files — use the read-only tools instead, including git_* tools for repository information. Some commands may be pre-approved for this project; you can add | head, | tail, | grep, or 2>&1 to any approved command and it will also be approved. Use workingDirectory to run in a subdirectory instead of `cd subdir &&` patterns.";
+    "Run a shell command in the current directory. This ALWAYS requires the user to approve it first, which ends your turn and costs them a round trip. Every other tool runs immediately without asking. Use this only for what no other tool can do: running tests, package managers, build steps. Never use it to read, search or list files — use the read-only tools instead, including git_* tools for repository information. Some commands may be pre-approved for this project; you can add | head, | tail, | grep, or 2>&1 to any approved command and it will also be approved. NEVER prefix a bash command with `cd subdir &&` or similar -- instead, use workingDirectory to run in a subdirectory.";
   schema = runBashArgs;
   protected async run({ command, reason, workingDirectory }: z.infer<typeof runBashArgs>) {
     this.requireAct();
@@ -703,6 +703,16 @@ class GitDiffTool extends SafeTool<z.infer<typeof gitDiffArgs>> {
   }
 }
 
+const getPwdArgs = z.object({});
+class GetPwdTool extends SafeTool<z.infer<typeof getPwdArgs>> {
+  name = "get_pwd";
+  description = "Get the current working directory (pwd). Returns the absolute path of the project root.";
+  schema = getPwdArgs;
+  protected async run(_args: z.infer<typeof getPwdArgs>) {
+    return CWD;
+  }
+}
+
 export const TOOLS = [
   ReadFileTool,
   ListTreeTool,
@@ -715,4 +725,5 @@ export const TOOLS = [
   GitLogTool,
   GitMergeBaseTool,
   GitDiffTool,
+  GetPwdTool,
 ];
