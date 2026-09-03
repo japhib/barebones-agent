@@ -692,6 +692,50 @@ export function readRange(a: Record<string, unknown>): string {
   return ` lines ${start}-${start + Math.min(limit, MAX_READ_LINES) - 1}`;
 }
 
+/** Check if an error is a connection failure that should be retried. */
+function isConnectionError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /ECONNREFUSED|fetch failed/i.test(msg);
+}
+
+/** Sleep for the specified number of milliseconds. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Retry a function with exponential backoff for connection errors.
+ * Retries at 500ms, 1s, and 2s intervals before giving up.
+ */
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  progress: Progress,
+): Promise<T> {
+  const delays = [500, 1000, 2000];
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= delays.length; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+      
+      // Don't retry non-connection errors
+      if (!isConnectionError(err)) throw err;
+      
+      // Don't retry if we're out of attempts
+      if (attempt >= delays.length) throw err;
+      
+      const delayMs = delays[attempt];
+      progress.line(dim(`LiteLLM slow to respond, retrying in ${delayMs}ms...`));
+      await sleep(delayMs);
+    }
+  }
+
+  // TypeScript doesn't know we always throw in the loop above
+  throw lastError;
+}
+
 /** A bare "Request timeout after 30000ms" tells the user nothing about what stalled. */
 export function explainFailure(err: unknown, cfg: Config): string {
   const msg = err instanceof Error ? err.message : String(err);
@@ -700,7 +744,7 @@ export function explainFailure(err: unknown, cfg: Config): string {
   if (err instanceof Error && err.name === "AbortError") return "The request was cut short.";
   // With everything behind one local proxy, "nothing is listening" is the failure the
   // user will hit most, and a bare ECONNREFUSED says nothing about how to fix it.
-  if (/ECONNREFUSED|fetch failed/i.test(msg)) {
+  if (isConnectionError(err)) {
     return (
       `Could not reach the LiteLLM proxy at ${cfg.baseUrl}. Start it with:\n` +
       `  launchctl kickstart -k gui/$(id -u)/${LAUNCH_AGENT}\n` +
@@ -1062,7 +1106,9 @@ async function main(): Promise<void> {
   let res;
   try {
     progress.step("thinking");
-    res = await chat.ask(prompt, { signal: cut.signal });
+    // Retry connection failures with exponential backoff (500ms, 1s, 2s) in case
+    // LiteLLM is slow to start or temporarily unresponsive.
+    res = await withRetry(() => chat.ask(prompt, { signal: cut.signal }), progress);
   } catch (err) {
     process.off("SIGINT", onSigint);
     progress.stop();
