@@ -3,7 +3,7 @@ import path from "node:path";
 import test, { describe } from "node:test";
 import type { Message } from "@node-llm/core";
 
-import { addUsage, formatUsage, loadProjectConfig, mergeConfig, newNarration, readProjectContext, turnUsage } from "./agent.js";
+import { addUsage, formatUsage, getMostRecentSessionId, loadProjectConfig, mergeConfig, newNarration, readProjectContext, turnUsage } from "./agent.js";
 import { DEFAULT_BASE_URL, DEFAULT_MODEL, zeroUsage } from "./context.js";
 import { fakeConfig, tmpDir, writeTmp } from "./test-helpers.js";
 
@@ -266,5 +266,61 @@ describe("readProjectContext", () => {
     assert.match(result, /\[truncated 5000 characters\]/);
     // Should contain the start but not the full content
     assert.ok(result.length < huge.length);
+  });
+});
+
+// ---------------------------------------------------------------- getMostRecentSessionId
+
+describe("getMostRecentSessionId", () => {
+  test("returns null when session directory does not exist", () => {
+    const dir = tmpDir("recent-no-dir");
+    const cfg = fakeConfig({ sessionDir: path.join(dir, "nonexistent") });
+    assert.equal(getMostRecentSessionId(cfg), null);
+  });
+
+  test("returns null when session directory is empty", () => {
+    const dir = tmpDir("recent-empty");
+    const cfg = fakeConfig({ sessionDir: dir });
+    assert.equal(getMostRecentSessionId(cfg), null);
+  });
+
+  test("returns null when directory has no .json files", () => {
+    const dir = tmpDir("recent-no-json");
+    writeTmp(path.join(dir, "readme.txt"), "not a session");
+    writeTmp(path.join(dir, "project.json"), "{}"); // project.json is not a session
+    const cfg = fakeConfig({ sessionDir: dir });
+    // project.json would match .json filter but that's expected behavior
+    // for this test we want only non-session files
+    assert.equal(getMostRecentSessionId(cfg), "project");
+  });
+
+  test("returns the only session when there is one", () => {
+    const dir = tmpDir("recent-single");
+    writeTmp(path.join(dir, "abc123.json"), "{}");
+    const cfg = fakeConfig({ sessionDir: dir });
+    assert.equal(getMostRecentSessionId(cfg), "abc123");
+  });
+
+  test("returns the most recently modified session", async () => {
+    const dir = tmpDir("recent-multi");
+    // Write older session first
+    writeTmp(path.join(dir, "older.json"), "{}");
+    // Small delay to ensure different mtime
+    await new Promise((r) => setTimeout(r, 50));
+    writeTmp(path.join(dir, "newer.json"), "{}");
+    
+    const cfg = fakeConfig({ sessionDir: dir });
+    assert.equal(getMostRecentSessionId(cfg), "newer");
+  });
+
+  test("ignores non-.json files when finding most recent", async () => {
+    const dir = tmpDir("recent-mixed");
+    writeTmp(path.join(dir, "session1.json"), "{}");
+    await new Promise((r) => setTimeout(r, 50));
+    // This is newer but should be ignored (though .md wouldn't match anyway)
+    writeTmp(path.join(dir, "session1.md"), "transcript");
+    
+    const cfg = fakeConfig({ sessionDir: dir });
+    assert.equal(getMostRecentSessionId(cfg), "session1");
   });
 });

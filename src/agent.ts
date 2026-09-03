@@ -283,6 +283,30 @@ export function ago(ms: number): string {
 }
 
 /**
+ * Find the most recently modified session in this directory.
+ * Returns the session ID, or null if no sessions exist.
+ */
+export function getMostRecentSessionId(cfg: Config): string | null {
+  const dir = sessionDir(cfg);
+  const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith(".json")) : [];
+
+  let newest: { id: string; mtimeMs: number } | null = null;
+  for (const file of files) {
+    const p = path.join(dir, file);
+    try {
+      const stat = fs.statSync(p);
+      const id = path.basename(file, ".json");
+      if (!newest || stat.mtimeMs > newest.mtimeMs) {
+        newest = { id, mtimeMs: stat.mtimeMs };
+      }
+    } catch {
+      // Skip unreadable files
+    }
+  }
+  return newest?.id ?? null;
+}
+
+/**
  * Every session saved under this directory, newest first, each with the command that
  * resumes it. Sessions live beside the project (cfg.sessionDir), so this is inherently
  * scoped to the current directory — there is no global list to filter.
@@ -736,6 +760,7 @@ const HELP = `barebones-agent — one turn of work per invocation.
   bba -s <id> -f prompt.md        take the prompt from a file
   bba -s <id> -e                  edit the transcript, then run what you wrote
   bba -s <id>                     run whatever is under the last "## You"
+  bba -c | --continue             continue the most recent session
   bba -l | --sessions             list this directory's sessions and how to resume each
 
   --plan / -p | --act / -a        switch mode (persists in the session). Default: act mode
@@ -758,6 +783,7 @@ async function main(): Promise<void> {
     allowPositionals: true,
     options: {
       session: { type: "string", short: "s" },
+      continue: { type: "boolean", short: "c" },
       file: { type: "string", short: "f" },
       edit: { type: "boolean", short: "e" },
       plan: { type: "boolean", short: "p" },
@@ -792,10 +818,19 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Handle -c/--continue: find the most recent session
+  let sessionId = values.session;
+  if (values.continue) {
+    if (values.session) die("Cannot use both -c/--continue and -s/--session.");
+    const recentId = getMostRecentSessionId(cfg);
+    if (!recentId) die(`No sessions to continue under ${sessionDir(cfg)}/. Start one with:\n  ${invocation()} "prompt"`);
+    sessionId = recentId;
+  }
+
   const mode: Mode = values.plan ? "plan" : values.act ? "act" : "act";
   const model = values.model || cfg.model;
-  const isNewSession = !values.session;
-  const session = isNewSession ? newSession(model, mode) : loadSession(cfg, values.session);
+  const isNewSession = !sessionId;
+  const session = isNewSession ? newSession(model, mode) : loadSession(cfg, sessionId);
   const projectCfg = loadProjectConfig(cfg);
   // Inject project context at the start of new sessions.
   // Uses contextFile from project config if set, else AGENTS.md / CLAUDE.md / README.md.

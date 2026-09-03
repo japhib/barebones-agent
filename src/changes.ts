@@ -146,9 +146,9 @@ export function paintChange(label: string, c: Change, maxLines = 200): string {
     const body = trimmed.map((l) => {
       if (l.kind === "removed") return `  ${RED}-${l.text}${RESET}`;
       if (l.kind === "added") return `  ${GREEN}+${l.text}${RESET}`;
-      return `  ${l.text}`;
+      return `   ${l.text}`;
     });
-    body.push(`  ${DIM}… ${diffLines.length - trimmed.length} more lines not shown${RESET}`);
+    body.push(`   ${DIM}… ${diffLines.length - trimmed.length} more lines not shown${RESET}`);
     return [head, ...body].join("\n");
   }
 
