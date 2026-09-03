@@ -738,8 +738,8 @@ const HELP = `barebones-agent — one turn of work per invocation.
   bba -s <id>                     run whatever is under the last "## You"
   bba -l | --sessions             list this directory's sessions and how to resume each
 
-  --plan | --act                  switch mode (persists in the session)
-  --model <alias>                 a model_name from the proxy's model_list
+  --plan / -p | --act / -a        switch mode (persists in the session). Default: act mode
+  -m / --model <alias>            a model_name from the proxy's model_list
   --approve | --always-approve    allow the pending shell command
   --decline [reason]              refuse it; with no reason, hands back to you
   --timeout <s>                   per-request limit for the model API
@@ -760,12 +760,12 @@ async function main(): Promise<void> {
       session: { type: "string", short: "s" },
       file: { type: "string", short: "f" },
       edit: { type: "boolean", short: "e" },
-      plan: { type: "boolean" },
-      act: { type: "boolean" },
+      plan: { type: "boolean", short: "p" },
+      act: { type: "boolean", short: "a" },
       approve: { type: "boolean" },
       "always-approve": { type: "boolean" },
       decline: { type: "boolean" },
-      model: { type: "string" },
+      model: { type: "string", short: "m" },
       editor: { type: "string" },
       timeout: { type: "string" },
       "bash-timeout": { type: "string" },
