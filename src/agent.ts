@@ -878,7 +878,10 @@ async function main(): Promise<void> {
 
   if (prompt) appendTranscript(cfg, session, `\n${YOU}\n\n${prompt}\n`);
 
-  if (!prompt && values.edit) {
+  // If no prompt provided via CLI or file, default to edit mode
+  const shouldEdit = values.edit || (!prompt && !positionals.length && !values.file);
+
+  if (!prompt && shouldEdit) {
     ensurePromptStub(cfg, session);
     const [cmd, ...args] = resolveEditor(values.editor, cfg);
     console.log(dim('Opening editor for user input ...'));
@@ -889,6 +892,17 @@ async function main(): Promise<void> {
   if (!prompt) prompt = readPromptFromTranscript(cfg, session);
 
   if (!prompt) {
+    // If this is a new session with no prompt, show help instead of creating empty session
+    if (isNewSession) {
+      // Clean up any files created by ensurePromptStub when opening editor
+      const transcriptPath = mdPath(cfg, session.id);
+      if (fs.existsSync(transcriptPath)) {
+        fs.unlinkSync(transcriptPath);
+      }
+      process.stdout.write(`${HELP}\n`);
+      return;
+    }
+    // For existing sessions, keep the original behavior
     ensurePromptStub(cfg, session);
     saveSession(cfg, session);
     die(`No prompt found. Write one under the last "## You" heading:\n\n↻  ${resume} -e`);
