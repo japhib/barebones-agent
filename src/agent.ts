@@ -35,7 +35,6 @@ import {
   type Interrupt,
   type Mode,
   type PendingBash,
-  type PendingQuestion,
   type ProjectConfig,
   type Renderer,
   type Session,
@@ -55,7 +54,6 @@ const GUI_EDITORS = new Set(["code", "code-insiders", "codium", "subl", "zed", "
 
 const YOU = "## You";
 const PROMPT_STUB = "<!-- type your next prompt below, save, and re-run -->";
-const ANSWER_STUB = "<!-- type your answer below, save, and re-run -->";
 const INTERRUPT_STUB = "<!-- ask what it was doing, or tell it where to go next -->";
 const ACT_STUB =
   "<!-- The agent is ready to build this. Write !act on its own line to switch to act\n     mode and proceed, or reply with changes you want first. -->";
@@ -223,7 +221,6 @@ function newSession(model: string, mode: Mode): Session {
     announcedMode: null,
     messages: [],
     usage: zeroUsage(),
-    pendingQuestion: null,
     pendingBash: null,
     declinedCommand: null,
     interrupted: null,
@@ -340,11 +337,9 @@ export function listSessions(cfg: Config): void {
     // A halted session resumes through the flag that unblocks it, not through -e.
     const waiting = s.pendingBash
       ? "  \u26a0 awaiting approval"
-      : s.pendingQuestion
-        ? "  ? awaiting an answer"
-        : s.interrupted
-          ? "  \u23f8 interrupted"
-          : "";
+      : s.interrupted
+        ? "  \u23f8 interrupted"
+        : "";
     const next = s.pendingBash ? "--approve" : "-e";
     const meta = `${ago(mtimeMs)} \u00b7 ${s.mode} \u00b7 ${s.model} \u00b7 ${s.usage.turns} turn${s.usage.turns === 1 ? "" : "s"}`;
     process.stdout.write(
@@ -406,10 +401,6 @@ function ensurePromptStub(cfg: Config, s: Session): void {
   if (!text.includes(`\n${YOU}\n`) || readPromptFromTranscript(cfg, s) !== "") {
     appendTranscript(cfg, s, `\n${YOU}\n\n${PROMPT_STUB}\n`);
   }
-}
-
-export function renderQuestion(q: PendingQuestion): string {
-  return [`\n## Agent asks\n`, `**${q.question}**\n`, `\n${YOU}\n\n${ANSWER_STUB}\n`].join("\n");
 }
 
 export function renderApproval(b: PendingBash, s: Session): string {
@@ -990,7 +981,6 @@ async function main(): Promise<void> {
   const directive = extractMode(prompt);
   prompt = directive.prompt;
   if (directive.mode) session.mode = directive.mode;
-  session.pendingQuestion = null;
 
   if (!values.quiet) {
     const switched = directive.mode || values.plan || values.act ? "  (switched)" : "";
@@ -1154,10 +1144,7 @@ async function main(): Promise<void> {
   // A halted turn ends with plumbing text ("Waiting for the user to approve: ..."),
   // not an answer, so the block the user must act on is shown in its place.
   let shown: string;
-  if (session.pendingQuestion) {
-    shown = renderQuestion(session.pendingQuestion);
-    appendTranscript(cfg, session, shown);
-  } else if (session.pendingBash) {
+  if (session.pendingBash) {
     shown = renderApproval(session.pendingBash, session);
     appendTranscript(cfg, session, shown);
   } else if (session.declinedCommand) {

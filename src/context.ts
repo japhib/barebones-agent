@@ -71,9 +71,6 @@ export interface ProjectConfig {
   alwaysApprove: string[];
 }
 
-export interface PendingQuestion {
-  question: string;
-}
 export interface PendingBash {
   command: string;
   reason: string;
@@ -104,7 +101,6 @@ export interface Session {
   announcedMode: Mode | null;
   messages: Message[];
   usage: Usage;
-  pendingQuestion: PendingQuestion | null;
   pendingBash: PendingBash | null;
   /** Set when the user declines interactively; the turn ends and they get the editor. */
   declinedCommand: string | null;
