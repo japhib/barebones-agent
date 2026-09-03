@@ -148,6 +148,11 @@ be read as it lands rather than reconstructed from `git diff` afterwards:
   +  console.log(`${greeting} ${name}`);
 ```
 
+`edit_file` accepts multiple edits in a single call — each with its own `old_string` and
+`new_string`. All edits are validated before any are applied, so a typo in one edit
+doesn't leave the file half-changed. This is more efficient than separate calls when
+making related changes (e.g., adding an import and using the imported function).
+
 There is no diff algorithm behind this, and no `diff` subprocess. There does not need to
 be: `edit_file` is handed the before and after text as `old_string` and `new_string`, so
 the change is already sitting in the tool's arguments. `old_string` is also the span the

@@ -197,27 +197,69 @@ class WriteFileTool extends SafeTool<z.infer<typeof writeFileArgs>> {
   }
 }
 
+const singleEdit = z.object({
+  old_string: z.string().describe("Exact text to replace; must appear exactly once in the file"),
+  new_string: z.string().describe("Replacement text"),
+});
 const editFileArgs = z.object({
   path: z.string().describe("File path relative to the current directory"),
-  old_string: z.string().describe("Exact text to replace; must appear exactly once"),
-  new_string: z.string().describe("Replacement text"),
+  edits: z.array(singleEdit).describe("List of edits to apply. They are validated and applied together, so an error in any edit aborts the whole operation."),
 });
 class EditFileTool extends SafeTool<z.infer<typeof editFileArgs>> {
   name = "edit_file";
-  description = "Replace an exact, unique string in a file. Include surrounding context to make old_string unique.";
+  description =
+    "Replace exact strings in a file. Each edit replaces old_string with new_string; all edits must match exactly once. Edits are applied in file order, so earlier edits can affect the positions of later ones.";
   schema = editFileArgs;
-  protected async run({ path: p, old_string, new_string }: z.infer<typeof editFileArgs>) {
+  protected async run({ path: p, edits }: z.infer<typeof editFileArgs>) {
     this.requireAct();
+    if (edits.length === 0) throw new Error("No edits provided.");
     const abs = resolveSafe(p);
-    const before = fs.readFileSync(abs, "utf8");
-    const parts = before.split(old_string);
-    if (parts.length === 1) throw new Error(`old_string not found in ${p}.`);
-    if (parts.length > 2) throw new Error(`old_string appears ${parts.length - 1} times in ${p}; add context to make it unique.`);
-    fs.writeFileSync(abs, parts.join(new_string));
-    // The change is the tool's own arguments: old_string came out, new_string went in.
-    // parts[0] is everything before the match, so its line count locates the edit.
-    const c = report(`edit_file ${p}:${lineOf(parts[0] as string)}`, describeChange(old_string, new_string));
-    return `Edited ${p} (${changeStat(c)}).`;
+    let content = fs.readFileSync(abs, "utf8");
+
+    // Phase 1: Validate all edits find exactly one match
+    interface Match {
+      old_string: string;
+      new_string: string;
+      index: number;
+    }
+    const matches: Match[] = [];
+    for (const { old_string, new_string } of edits) {
+      const parts = content.split(old_string);
+      if (parts.length === 1) throw new Error(`old_string not found in ${p}: ${JSON.stringify(old_string.slice(0, 60))}${old_string.length > 60 ? "..." : ""}`);
+      if (parts.length > 2) throw new Error(`old_string appears ${parts.length - 1} times in ${p}; add context to make it unique: ${JSON.stringify(old_string.slice(0, 60))}${old_string.length > 60 ? "..." : ""}`);
+      matches.push({ old_string, new_string, index: (parts[0] as string).length });
+    }
+
+    // Phase 2: Sort by position descending (apply from bottom to top to preserve offsets)
+    matches.sort((a, b) => b.index - a.index);
+
+    // Phase 3: Check for overlaps (edits whose ranges intersect)
+    for (let i = 0; i < matches.length - 1; i++) {
+      const current = matches[i]!;
+      const next = matches[i + 1]!;
+      // current starts at current.index, ends at current.index + current.old_string.length
+      // next starts at next.index (which is <= current.index since sorted descending)
+      if (next.index + next.old_string.length > current.index) {
+        throw new Error(`Overlapping edits: one edit ends at position ${next.index + next.old_string.length} but another starts at ${current.index}.`);
+      }
+    }
+
+    // Phase 4: Apply edits in reverse order and report each one
+    const stats: string[] = [];
+    for (const { old_string, new_string, index } of matches) {
+      const before = content.slice(0, index);
+      const after = content.slice(index + old_string.length);
+      content = before + new_string + after;
+      const c = report(`edit_file ${p}:${lineOf(before)}`, describeChange(old_string, new_string));
+      stats.push(changeStat(c));
+    }
+
+    fs.writeFileSync(abs, content);
+    // Report in original (file) order, which is reverse of how we applied them
+    const statsSummary = stats.reverse().join(", ");
+    return edits.length === 1
+      ? `Edited ${p} (${statsSummary}).`
+      : `Edited ${p} (${edits.length} edits: ${statsSummary}).`;
   }
 }
 

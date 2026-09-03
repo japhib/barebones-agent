@@ -105,7 +105,7 @@ describe("what the editing tools show", () => {
   test("edit_file shows its own arguments: old_string out, new_string in", async () => {
     const dir = tmpDir("show-edit");
     const rel = writeTmp(`${dir}/e.txt`, "one\ntwo\nthree\n");
-    const out = await shown(() => tool("edit_file").execute({ path: rel, old_string: "two", new_string: "TWO" }));
+    const out = await shown(() => tool("edit_file").execute({ path: rel, edits: [{ old_string: "two", new_string: "TWO" }] }));
 
     assert.ok(out.includes("\x1b[31m-two"), "the replaced span, in red");
     assert.ok(out.includes("\x1b[32m+TWO"), "its replacement, in green");
@@ -115,7 +115,7 @@ describe("what the editing tools show", () => {
   test("the line number counts newlines before the match", async () => {
     const dir = tmpDir("show-line");
     const rel = writeTmp(`${dir}/n.txt`, "a\nb\nc\nd\nTARGET\ne\n");
-    const out = await shown(() => tool("edit_file").execute({ path: rel, old_string: "TARGET", new_string: "HIT" }));
+    const out = await shown(() => tool("edit_file").execute({ path: rel, edits: [{ old_string: "TARGET", new_string: "HIT" }] }));
     assert.ok(out.includes(`${rel}:5`), `expected :5 in ${JSON.stringify(out)}`);
   });
 
@@ -123,12 +123,31 @@ describe("what the editing tools show", () => {
     const dir = tmpDir("show-multi");
     const rel = writeTmp(`${dir}/m.txt`, "keep\nold1\nold2\nkeep\n");
     const out = await shown(() =>
-      tool("edit_file").execute({ path: rel, old_string: "old1\nold2", new_string: "new1\nnew2\nnew3" }),
+      tool("edit_file").execute({ path: rel, edits: [{ old_string: "old1\nold2", new_string: "new1\nnew2\nnew3" }] }),
     );
     for (const line of ["-old1", "-old2", "+new1", "+new2", "+new3"]) {
       assert.ok(out.includes(line), `expected ${line}`);
     }
     assert.ok(!out.includes("keep"), "untouched text is not reprinted");
+  });
+
+  test("multiple edits in one call each show their changes", async () => {
+    const dir = tmpDir("show-multi-edit");
+    const rel = writeTmp(`${dir}/m.txt`, "AAA\nBBB\nCCC\n");
+    const out = await shown(() =>
+      tool("edit_file").execute({
+        path: rel,
+        edits: [
+          { old_string: "AAA", new_string: "aaa" },
+          { old_string: "CCC", new_string: "ccc" },
+        ],
+      }),
+    );
+    // Each edit gets its own report with the correct line number
+    assert.ok(out.includes(`${rel}:1`), "first edit at line 1");
+    assert.ok(out.includes(`${rel}:3`), "second edit at line 3");
+    assert.ok(out.includes("-AAA") && out.includes("+aaa"), "first edit shown");
+    assert.ok(out.includes("-CCC") && out.includes("+ccc"), "second edit shown");
   });
 
   test("write_file marks a file it created and shows it as all additions", async () => {
@@ -167,7 +186,7 @@ describe("what the editing tools show", () => {
     const rel = writeTmp(`${dir}/q.txt`, "one\n");
     useContext({ session: { mode: "act" }, progress: new Progress(false) });
     const out = await captureStderr(async () => {
-      await tool("edit_file").execute({ path: rel, old_string: "one", new_string: "two" });
+      await tool("edit_file").execute({ path: rel, edits: [{ old_string: "one", new_string: "two" }] });
     });
     assert.equal(out, "");
   });
@@ -178,7 +197,7 @@ describe("what the editing tools show", () => {
     const dir = tmpDir("show-result");
     const rel = writeTmp(`${dir}/r.txt`, "a\nb\nc\n");
     useContext({ session: { mode: "act" }, progress: new Progress(false) });
-    const out = String(await tool("edit_file").execute({ path: rel, old_string: "b", new_string: "B\nB2" }));
+    const out = String(await tool("edit_file").execute({ path: rel, edits: [{ old_string: "b", new_string: "B\nB2" }] }));
     assert.equal(out, `Edited ${rel} (+2 -1).`);
     assert.ok(!out.includes("\x1b["), "and no escape codes in the model's history");
   });
@@ -186,7 +205,7 @@ describe("what the editing tools show", () => {
   test("a refused edit prints nothing, because nothing was written", async () => {
     const dir = tmpDir("show-fail");
     const rel = writeTmp(`${dir}/x.txt`, "content\n");
-    const out = await shown(() => tool("edit_file").execute({ path: rel, old_string: "absent", new_string: "y" }));
+    const out = await shown(() => tool("edit_file").execute({ path: rel, edits: [{ old_string: "absent", new_string: "y" }] }));
     assert.equal(out, "");
   });
 });
@@ -207,7 +226,7 @@ describe("write_file / edit_file / delete_file", () => {
     useContext({ session: { mode: "act" } });
     const dir = tmpDir("edit");
     const rel = writeTmp(`${dir}/e.txt`, "hello world and hello again");
-    const out = await tool("edit_file").execute({ path: rel, old_string: "hello world", new_string: "goodbye" });
+    const out = await tool("edit_file").execute({ path: rel, edits: [{ old_string: "hello world", new_string: "goodbye" }] });
     assert.equal(out, `Edited ${rel} (+1 -1).`);
     const read = await tool("read_file").execute({ path: rel });
     assert.equal(read, "1\tgoodbye and hello again");
@@ -217,11 +236,69 @@ describe("write_file / edit_file / delete_file", () => {
     useContext({ session: { mode: "act" } });
     const dir = tmpDir("edit");
     const rel = writeTmp(`${dir}/f.txt`, "same same same");
-    const missing = await tool("edit_file").execute({ path: rel, old_string: "nope", new_string: "x" });
+    const missing = await tool("edit_file").execute({ path: rel, edits: [{ old_string: "nope", new_string: "x" }] });
     assert.match(String(missing), /old_string not found/);
 
-    const dup = await tool("edit_file").execute({ path: rel, old_string: "same", new_string: "x" });
+    const dup = await tool("edit_file").execute({ path: rel, edits: [{ old_string: "same", new_string: "x" }] });
     assert.match(String(dup), /appears 3 times/);
+  });
+
+  test("edit_file applies multiple edits in a single call", async () => {
+    useContext({ session: { mode: "act" } });
+    const dir = tmpDir("multi-edit");
+    const rel = writeTmp(`${dir}/m.txt`, "line1\nline2\nline3\nline4\n");
+    const out = await tool("edit_file").execute({
+      path: rel,
+      edits: [
+        { old_string: "line1", new_string: "FIRST" },
+        { old_string: "line3", new_string: "THIRD" },
+      ],
+    });
+    assert.match(String(out), /2 edits/);
+    const read = await tool("read_file").execute({ path: rel });
+    assert.equal(read, "1\tFIRST\n2\tline2\n3\tTHIRD\n4\tline4\n5\t");
+  });
+
+  test("edit_file rejects overlapping edits", async () => {
+    useContext({ session: { mode: "act" } });
+    const dir = tmpDir("overlap");
+    const rel = writeTmp(`${dir}/o.txt`, "hello world");
+    const out = await tool("edit_file").execute({
+      path: rel,
+      edits: [
+        { old_string: "hello world", new_string: "X" },
+        { old_string: "world", new_string: "Y" },
+      ],
+    });
+    assert.match(String(out), /Overlapping edits/);
+    // File should be unchanged since the operation was aborted
+    const read = await tool("read_file").execute({ path: rel });
+    assert.equal(read, "1\thello world");
+  });
+
+  test("edit_file rejects empty edits array", async () => {
+    useContext({ session: { mode: "act" } });
+    const dir = tmpDir("empty-edits");
+    const rel = writeTmp(`${dir}/e.txt`, "content");
+    const out = await tool("edit_file").execute({ path: rel, edits: [] });
+    assert.match(String(out), /No edits provided/);
+  });
+
+  test("edit_file aborts all edits if any single edit fails validation", async () => {
+    useContext({ session: { mode: "act" } });
+    const dir = tmpDir("abort-all");
+    const rel = writeTmp(`${dir}/a.txt`, "keep\nchange\nkeep");
+    const out = await tool("edit_file").execute({
+      path: rel,
+      edits: [
+        { old_string: "change", new_string: "CHANGED" },
+        { old_string: "nonexistent", new_string: "X" },
+      ],
+    });
+    assert.match(String(out), /old_string not found/);
+    // File should be unchanged since validation failed before any edits were applied
+    const read = await tool("read_file").execute({ path: rel });
+    assert.equal(read, "1\tkeep\n2\tchange\n3\tkeep");
   });
 
   test("delete_file removes a file but refuses a directory", async () => {
@@ -242,9 +319,9 @@ describe("write_file / edit_file / delete_file", () => {
   test("mutating tools are refused in plan mode", async () => {
     useContext({ session: { mode: "plan" } });
     const dir = tmpDir("plan");
-    const cases: { name: string; args: Record<string, string> }[] = [
+    const cases: { name: string; args: Record<string, unknown> }[] = [
       { name: "write_file", args: { path: `${dir}/p.txt`, content: "x" } },
-      { name: "edit_file", args: { path: `${dir}/p.txt`, old_string: "x", new_string: "y" } },
+      { name: "edit_file", args: { path: `${dir}/p.txt`, edits: [{ old_string: "x", new_string: "y" }] } },
       { name: "delete_file", args: { path: `${dir}/p.txt` } },
       { name: "run_bash", args: { command: "true", reason: "z" } },
     ];
