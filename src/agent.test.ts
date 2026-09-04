@@ -72,6 +72,21 @@ describe("mergeConfig", () => {
     const { cfg } = merge({ stopHook: null });
     assert.equal(cfg.stopHook, "");
   });
+
+  test("confirmHook defaults to empty string", () => {
+    const { cfg } = merge({});
+    assert.equal(cfg.confirmHook, "");
+  });
+
+  test("confirmHook can be set to a command", () => {
+    const { cfg } = merge({ confirmHook: "afplay /System/Library/Sounds/Ping.aiff" });
+    assert.equal(cfg.confirmHook, "afplay /System/Library/Sounds/Ping.aiff");
+  });
+
+  test("confirmHook set to null leaves the default empty string", () => {
+    const { cfg } = merge({ confirmHook: null });
+    assert.equal(cfg.confirmHook, "");
+  });
 });
 
 describe("newNarration", () => {

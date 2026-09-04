@@ -362,7 +362,8 @@ CLI flag → environment → config file → default.
   "sessionDir": ".agent",
   "requestTimeoutMs": 600000,
   "bashTimeoutMs": 120000,
-  "stopHook": ""
+  "stopHook": "",
+  "confirmHook": ""
 }
 ```
 
@@ -388,8 +389,15 @@ that the agent has finished and needs input — for example, to play a sound:
 ```json
 "stopHook": "afplay /System/Library/Sounds/Glass.aiff"
 ```
-The command is run in a detached shell with a 5-second timeout. Hook failures are silently
-ignored so they never break the agent's exit flow. Leave it empty (`""`) to disable.
+
+`confirmHook` is a shell command that runs when `run_bash` needs your approval. Use it to
+get an immediate notification that the agent is waiting for confirmation:
+```json
+"confirmHook": "afplay /System/Library/Sounds/Ping.aiff"
+```
+
+Both hooks run in a detached shell without blocking the parent process. Hook failures are
+silently ignored so they never break the agent's flow. Leave them empty (`""`) to disable.
 
 ### Project configuration
 

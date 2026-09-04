@@ -20,6 +20,7 @@ import {
   cap,
   ctx,
   resolveSafe,
+  runHook,
   saveProjectConfig,
 } from "./context.js";
 import { dim } from "./progress.js";
@@ -519,6 +520,8 @@ class RunBashTool extends SafeTool<z.infer<typeof runBashArgs>> {
     } else if (onceIdx !== -1) {
       session.approvedOnce.splice(onceIdx, 1); // a one-shot approval is spent
     } else {
+      // Run the confirm hook to notify the user that approval is needed
+      runHook(cfg.confirmHook);
       const answer = await askApproval(command, reason, workingDirectory);
       if (ctx().interrupt.requested) return this.halt(INTERRUPT_HALT);
       if (answer === null) {

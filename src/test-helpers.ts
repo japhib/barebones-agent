@@ -27,6 +27,8 @@ export function fakeConfig(over: Partial<Config> = {}): Config {
     sessionDir: ".agent",
     requestTimeoutMs: 1_000,
     bashTimeoutMs: 1_000,
+    stopHook: "",
+    confirmHook: "",
     ...over,
   };
 }

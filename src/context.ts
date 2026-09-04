@@ -3,6 +3,7 @@
  * depends on. Kept in its own module so `tools.ts` and `agent.ts` can both import it
  * without a cycle.
  */
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -63,6 +64,8 @@ export interface Config {
   bashTimeoutMs: number;
   /** Shell command to run when the program exits (e.g., to play a sound). */
   stopHook: string;
+  /** Shell command to run when the agent needs confirmation for run_bash. */
+  confirmHook: string;
 }
 
 /** Per-project configuration, stored in .agent/project.json beside the sessions. */
@@ -159,6 +162,27 @@ export function ctx(): Ctx {
 export function cap(s: string, limit = MAX_TOOL_OUTPUT): string {
   if (s.length <= limit) return s;
   return `${s.slice(0, limit)}\n\u2026 truncated ${s.length - limit} more characters.`;
+}
+
+/**
+ * Run a hook command (stopHook or confirmHook) in a fire-and-forget manner.
+ * The parent process does not wait for the hook to complete.
+ */
+export function runHook(cmd: string): void {
+  const trimmed = cmd.trim();
+  if (!trimmed) return;
+  try {
+    // Run detached and unref so we don't wait for it or capture output.
+    // unref() is required: detached alone still keeps a reference that
+    // prevents the parent from exiting until the child finishes.
+    const child = spawn("sh", ["-c", trimmed], {
+      stdio: "ignore",
+      detached: true,
+    });
+    child.unref();
+  } catch {
+    // ignore hook failures
+  }
 }
 
 /** Every path the agent touches goes through here. */

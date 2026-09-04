@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import test, { describe } from "node:test";
 
-import { CWD, MAX_TOOL_OUTPUT, cap, ctx, resolveSafe, zeroUsage } from "./context.js";
+import { CWD, MAX_TOOL_OUTPUT, cap, ctx, resolveSafe, runHook, zeroUsage } from "./context.js";
 import { fakeConfig, useContext } from "./test-helpers.js";
 
 describe("resolveSafe", () => {
@@ -83,4 +83,21 @@ describe("context handle", () => {
 
 test("zeroUsage starts every counter at zero", () => {
   assert.deepEqual(zeroUsage(), { input: 0, output: 0, requests: 0, turns: 0 });
+});
+
+describe("runHook", () => {
+  test("does nothing for empty or whitespace-only command", () => {
+    // Should not throw
+    runHook("");
+    runHook("   ");
+    runHook("\n\t");
+  });
+
+  test("runs a command without blocking", async () => {
+    // This is a smoke test — the hook runs in a detached subprocess,
+    // so we can't easily verify its output. We just verify it doesn't throw.
+    runHook("true");
+    // Give the subprocess a moment to start (not strictly necessary for 'true')
+    await new Promise((r) => setTimeout(r, 10));
+  });
 });

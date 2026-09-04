@@ -11,7 +11,7 @@ import { ModelRegistry, createLLM, type Message, type NodeLLMCore } from "@node-
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { parseArgs } from "node:util";
 
 import { repairDangling } from "./history.js";
@@ -27,6 +27,7 @@ import {
   DEFAULT_REQUEST_TIMEOUT_MS,
   MAX_READ_LINES,
   PLACEHOLDER_API_KEY,
+  runHook,
   saveConfig,
   saveProjectConfig,
   setContext,
@@ -70,6 +71,7 @@ const DEFAULT_CONFIG: Config = {
   requestTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
   bashTimeoutMs: DEFAULT_BASH_TIMEOUT_MS,
   stopHook: "",
+  confirmHook: "",
 };
 
 // ---------------------------------------------------------------- helpers
@@ -88,23 +90,9 @@ class AgentExit extends Error {
   }
 }
 
-/**
- * Run the stop hook command if configured. Executed when the program exits to notify
- * the user (e.g., by playing a sound).
- */
+/** Run the stop hook when the program exits. */
 function runStopHook(cfg: Config): void {
-  const cmd = cfg.stopHook.trim();
-  if (!cmd) return;
-  try {
-    // Run detached so we don't wait for it or capture output
-    spawn("sh", ["-c", cmd], {
-      stdio: "ignore",
-      detached: true,
-      timeout: 5000, // 5s max for the hook itself
-    });
-  } catch {
-    // ignore it
-  }
+  runHook(cfg.stopHook);
 }
 
 /** Exit with an error message. Throws AgentExit to unwind to the top-level handler. */
