@@ -44,6 +44,7 @@ Every run prints the exact command to continue:
 
 | Flag | |
 |---|---|
+| `--code-review` | Review code changes in current branch; automatically uses plan mode |
 | `--plan` / `--act` | Switch mode; persists in the session |
 | `--model <alias>` | A `model_name` from the proxy's `model_list`; sticks to the session |
 | `--approve` | Run the pending shell command once (non-interactive fallback) |

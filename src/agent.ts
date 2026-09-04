@@ -539,6 +539,44 @@ path:line, show only the code that matters, and say plainly what you did and wha
 did not do.
 `;
 
+const CODE_REVIEW_PROMPT = `Perform a code review on the changes in the current git branch.
+
+Start by using the get_merge_base tool to figure out where this branch diverges from main: git_merge_base(autoDetectMain=true)
+
+Then use the git_diff tool to perform a diff between this branch and the merge-base of main: git_diff(ref1=null,ref2={result from previous command})
+
+Examine all the changes output by the git_diff tool. DO NOT run any bash commands using the run_bash tool since those will require user input. DO NOT write, edit, or delete any files. Use any of the remaining read-only tools as necessary (they are automatically approved) to get insight about the impact of the current code changes.
+
+For the output of your code review, keep your comments focused on what has actually changed in the current branch. Only comment on something in pre-existing code if there is a high-priority change that needs to be made - and in that case, make it clear that you are commenting on pre-existing code rather than something that has changed in the current branch.
+
+Structure your output like this:
+
+[example output]
+
+# Code review on branch {branch name}
+
+## Summary of changes
+
+{Give a full summary of everything that has changed. Say whether the changes have corresponding changes in the automated tests.}
+
+## Findings
+
+{
+  Group all criticisms by:
+  - category (correctness, performance, security, maintainability, readability, etc.)
+  - priority (critical, high, medium, low) using appropriate '###' headings
+
+  Avoid giving any purely-stylistic nitpicks, except if something is clearly un-idiomatic for the programming language being used.
+
+  For security-related findings, only say something is a security concern if it's plausibly exploitable by an external user.
+
+  For new/changed queries, examine the performance impact of the query changes based on what you know about the DB being used in the service. (Investigate the DB structure as needed.)
+  Comment on whether new indices might be needed for a changed query.
+}
+
+[/example output]
+`
+
 export function modeMessage(mode: Mode): string {
   return mode === "plan"
     ? "[mode: plan] Investigate and produce a plan. Do not modify anything — the editing tools will refuse to run."
@@ -820,6 +858,7 @@ const HELP = `barebones-agent — one turn of work per invocation.
   bba -c | --continue             continue the most recent session
   bba -l | --sessions             list this directory's sessions and how to resume each
 
+  --code-review                   review code changes in current branch (sets plan mode)
   --plan / -p | --act / -a        switch mode (persists in the session). Default: act mode
   -m / --model <alias>            a model_name from the proxy's model_list
   --approve | --always-approve    allow the pending shell command
@@ -845,6 +884,7 @@ async function main(cfg: Config): Promise<void> {
       edit: { type: "boolean", short: "e" },
       plan: { type: "boolean", short: "p" },
       act: { type: "boolean", short: "a" },
+      "code-review": { type: "boolean" },
       approve: { type: "boolean" },
       "always-approve": { type: "boolean" },
       decline: { type: "boolean" },
@@ -960,6 +1000,18 @@ async function main(cfg: Config): Promise<void> {
       return;
     }
     prompt = `${note} ${reason}`;
+  } else if (values["code-review"]) {
+    // --code-review: use CODE_REVIEW_PROMPT, append any user prompt
+    const userPrompt = positionals.length
+      ? positionals.join(" ")
+      : values.file
+        ? fs.readFileSync(values.file, "utf8").trim()
+        : "";
+    prompt = userPrompt
+      ? `${CODE_REVIEW_PROMPT}\n\n${userPrompt}`
+      : CODE_REVIEW_PROMPT;
+    // Force plan mode for code review
+    session.mode = "plan";
   } else if (positionals.length) {
     prompt = positionals.join(" ");
   } else if (values.file) {
