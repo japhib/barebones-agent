@@ -566,12 +566,17 @@ Structure your output like this:
   - category (correctness, performance, security, maintainability, readability, etc.)
   - priority (critical, high, medium, low) using appropriate '###' headings
 
-  Avoid giving any purely-stylistic nitpicks, except if something is clearly un-idiomatic for the programming language being used.
+  Be selective when assigning a finding to "critical" or "high" priority - only use this category for things that are critical NOW, not if it might be critical in the future. Anything
+  that is only applicable in a hypothetical future state is automatically "low" priority.
 
-  For security-related findings, only say something is a security concern if it's plausibly exploitable by an external user.
+  Avoid giving any purely-stylistic nitpicks, except if something is clearly un-idiomatic for the programming language being used.
+  
+  For new test functions, check if they should actually be new test cases in an existing table-driven test. (This is a low-priority finding.)
+
+  For security-related findings, only say something is a security concern if it's plausibly exploitable by an external user now (not in some hypothetical future state).
 
   For new/changed queries, examine the performance impact of the query changes based on what you know about the DB being used in the service. (Investigate the DB structure as needed.)
-  Comment on whether new indices might be needed for a changed query.
+  Comment on whether new indices might be needed for the changed query in its current state.
 }
 
 [/example output]
