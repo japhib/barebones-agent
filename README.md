@@ -277,12 +277,12 @@ waits for a single keypress, without ending the turn:
 run_bash wants to run:
   npm test
   Verify the refactor before moving on.
-  [y] run once   [a] always allow this command   [n] decline
+  [y/space/enter] run once   [a] always allow this command   [n] decline
   → approved
 ```
 
-`y` runs it and the agent carries on in the same process — no re-invoke, no re-sending
-the history. `a` also appends it to `alwaysApprove` in the project config, so it is never
+`y`, space, or enter runs it and the agent carries on in the same process — no re-invoke,
+no re-sending the history. `a` also appends it to `alwaysApprove` in the project config, so it is never
 asked again in this project. Only **`n`** ends the turn, writing a `## Declined` block
 and handing you the editor to say what to do instead.
 

@@ -281,7 +281,14 @@ class DeleteFileTool extends SafeTool<z.infer<typeof deleteFileArgs>> {
 }
 
 type Approval = "yes" | "always" | "no";
-const APPROVAL_KEYS: Record<string, Approval> = { y: "yes", a: "always", n: "no" };
+const APPROVAL_KEYS: Record<string, Approval> = {
+  y: "yes",
+  " ": "yes",
+  "\r": "yes",
+  "\n": "yes",
+  a: "always",
+  n: "no",
+};
 
 /**
  * Characters that are forbidden in suffix arguments because they enable
@@ -470,7 +477,7 @@ async function askApproval(command: string, reason: string, workingDirectory?: s
   
   process.stderr.write(
     `\n\x1b[1mrun_bash\x1b[0m wants to run:\n  ${displayCmd}\n${inDir}  \x1b[2m${reason}\x1b[0m\n` +
-      `  [\x1b[1my\x1b[0m] run once   [\x1b[1ma\x1b[0m] always allow this command${alsoVariations}   [\x1b[1mn\x1b[0m] decline\n`,
+      `  [\x1b[1my\x1b[0m/\x1b[1mspace\x1b[0m/\x1b[1menter\x1b[0m] run once   [\x1b[1ma\x1b[0m] always allow this command${alsoVariations}   [\x1b[1mn\x1b[0m] decline\n`,
   );
   const answer = APPROVAL_KEYS[await readKey(Object.keys(APPROVAL_KEYS))] ?? "no";
   // Ctrl-C here is an interrupt, not a refusal — saying "declined" would tell both the
