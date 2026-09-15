@@ -356,7 +356,9 @@ function findLastUnquotedPipe(s: string): number {
 
 /**
  * Strip common shell suffixes that don't change what command is being run:
- * - `2>&1` (stderr redirection)
+ * - `2>&1` (stderr to stdout)
+ * - `2>/dev/null` (discard stderr)
+ * - `1>/dev/null` (discard stdout)
  * - `| head ...`, `| tail ...`, `| grep ...` (output filtering)
  *
  * Returns the base command (to check against alwaysApprove) and the suffix.
@@ -401,8 +403,8 @@ export function extractBaseCommand(command: string): { base: string; suffix: str
       }
     }
     
-    // Match trailing 2>&1
-    const redirMatch = base.match(/\s+2>&1$/);
+    // Match trailing redirections: 2>&1, 2>/dev/null, 1>/dev/null
+    const redirMatch = base.match(/\s+(2>&1|[12]>\/dev\/null)$/);
     if (redirMatch) {
       suffix = redirMatch[0] + suffix;
       base = base.slice(0, -redirMatch[0].length).trimEnd();

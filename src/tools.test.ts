@@ -404,6 +404,14 @@ describe("extractBaseCommand", () => {
     assert.deepEqual(extractBaseCommand("npm test 2>&1"), { base: "npm test", suffix: " 2>&1" });
   });
 
+  test("strips trailing 2>/dev/null", () => {
+    assert.deepEqual(extractBaseCommand("npm test 2>/dev/null"), { base: "npm test", suffix: " 2>/dev/null" });
+  });
+
+  test("strips trailing 1>/dev/null", () => {
+    assert.deepEqual(extractBaseCommand("npm test 1>/dev/null"), { base: "npm test", suffix: " 1>/dev/null" });
+  });
+
   test("strips pipe to head", () => {
     assert.deepEqual(extractBaseCommand("npm test | head -10"), { base: "npm test", suffix: " | head -10" });
     assert.deepEqual(extractBaseCommand("npm test | head"), { base: "npm test", suffix: " | head" });
@@ -420,7 +428,7 @@ describe("extractBaseCommand", () => {
   });
 
   test("strips chained suffixes in order", () => {
-    // The order is: first strip pipes (from end), then 2>&1
+    // The order is: first strip pipes (from end), then redirections
     assert.deepEqual(
       extractBaseCommand("npm test 2>&1 | grep foo | head -5"),
       { base: "npm test", suffix: " 2>&1 | grep foo | head -5" }
@@ -428,6 +436,14 @@ describe("extractBaseCommand", () => {
     assert.deepEqual(
       extractBaseCommand("npm test | tail -10 | grep error"),
       { base: "npm test", suffix: " | tail -10 | grep error" }
+    );
+    assert.deepEqual(
+      extractBaseCommand("npm test 2>/dev/null | grep foo"),
+      { base: "npm test", suffix: " 2>/dev/null | grep foo" }
+    );
+    assert.deepEqual(
+      extractBaseCommand("npm test 1>/dev/null 2>&1"),
+      { base: "npm test", suffix: " 1>/dev/null 2>&1" }
     );
   });
 

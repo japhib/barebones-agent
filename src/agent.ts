@@ -946,7 +946,7 @@ async function main(cfg: Config): Promise<void> {
         `[pre-approved run_bash commands]\n` +
         `The following commands are already approved and will run without asking:\n` +
         projectCfg.alwaysApprove.map(cmd => `  ${cmd}`).join("\n") + "\n" +
-        `Prefer these when you need shell access. You may add | head, | tail, | grep, or 2>&1 to any of them.\n` +
+        `Prefer these when you need shell access. You may add | head, | tail, | grep, or 2>&1, 2>/dev/null, 1>/dev/null to any of them.\n` +
         `[/pre-approved run_bash commands]`
       );
     }

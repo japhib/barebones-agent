@@ -420,8 +420,9 @@ give the agent project-specific context. Set this to use a different file instea
 project-specific — a command approved in one repo does not carry to another. Use
 `--always-approve` to add to this list interactively.
 
-Approved commands may be extended with `| head`, `| tail`, `| grep`, or `2>&1` without
-re-approval — so `npm test | grep error | head -20` runs if `npm test` is approved. For
+Approved commands may be extended with `| head`, `| tail`, `| grep`, or `2>&1`,
+`2>/dev/null`, `1>/dev/null` without re-approval — so `npm test | grep error | head -20`
+runs if `npm test` is approved. For
 security, suffixes containing shell metacharacters (`$`, `` ` ``, `<`, `>`) are rejected
 to prevent command substitution and file redirection attacks. The `grep -f` flag is also
 blocked since it reads patterns from arbitrary files. Keep approved commands narrow:
