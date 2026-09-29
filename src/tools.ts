@@ -700,7 +700,7 @@ class GitMergeBaseTool extends SafeTool<z.infer<typeof gitMergeBaseArgs>> {
   description = "Find the common ancestor commit between two refs. Useful for finding where a branch diverged from main.";
   schema = gitMergeBaseArgs;
   
-  private detectMainBranch(cwd: string): string | null {
+  private detectMainBranch(cwd: string): string | undefined {
     const candidates = ["origin/main", "origin/master", "main", "master"];
     for (const branch of candidates) {
       try {
@@ -710,7 +710,7 @@ class GitMergeBaseTool extends SafeTool<z.infer<typeof gitMergeBaseArgs>> {
         continue;
       }
     }
-    return null;
+    return undefined;
   }
 
   protected async run({ ref1 = "HEAD", ref2, autoDetectMain = true, workingDirectory, showStderr = false }: z.infer<typeof gitMergeBaseArgs>) {

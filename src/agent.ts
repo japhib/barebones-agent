@@ -87,7 +87,7 @@ const DEFAULT_CONFIG: Config = {
 class AgentExit extends Error {
   constructor(
     public readonly code: number,
-    public readonly message: string = "",
+    public override readonly message: string = "",
   ) {
     super(message);
   }
@@ -896,7 +896,7 @@ async function main(cfg: Config): Promise<void> {
   const mode: Mode = values.plan ? "plan" : values.act ? "act" : "act";
   const model = values.model || cfg.model;
   const isNewSession = !sessionId;
-  const session = isNewSession ? newSession(model, mode) : loadSession(cfg, sessionId);
+  const session = isNewSession ? newSession(model, mode) : loadSession(cfg, sessionId!);
   const projectCfg = loadProjectConfig(cfg);
   // Inject project context at the start of new sessions.
   // Uses contextFile from project config if set, else AGENTS.md / CLAUDE.md / README.md.

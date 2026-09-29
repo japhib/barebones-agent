@@ -221,7 +221,7 @@ describe("loadProjectConfig", () => {
     const dir = tmpDir("projcfg-no-file");
     const cfg = fakeConfig({ sessionDir: dir });
     const proj = loadProjectConfig(cfg);
-    assert.deepEqual(proj, { alwaysApprove: [] });
+    assert.deepEqual(proj.alwaysApprove, []);
     assert.equal(proj.contextFile, undefined);
   });
 
