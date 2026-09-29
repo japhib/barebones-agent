@@ -48,10 +48,9 @@ export function fakeSession(over: Partial<Session> = {}): Session {
     announcedMode: null,
     messages: [],
     usage: zeroUsage(),
-    pendingBash: null,
     declinedCommand: null,
     interrupted: null,
-    approvedOnce: [],
+    approveAllBash: false,
     ...over,
   };
 }

@@ -618,11 +618,10 @@ describe("extractBaseCommand", () => {
 });
 
 describe("run_bash", () => {
-  test("falls back to the transcript when there is no TTY to ask on", async () => {
+  test("refuses to run when there is no TTY to ask on", async () => {
     const c = useContext({ session: { mode: "act" } });
     const result = await tool("run_bash").execute({ command: "echo hi", reason: "test it" });
-    assert.match(String(result), /Waiting for the user to approve: echo hi/);
-    assert.deepEqual(c.session.pendingBash, { command: "echo hi", reason: "test it" });
+    assert.match(String(result), /Cannot execute.*no TTY/);
   });
 
   test("auto-approves variations of commands in alwaysApprove list", async () => {
@@ -632,12 +631,22 @@ describe("run_bash", () => {
       projectCfg: { alwaysApprove: ["echo hello"] },
     });
     
-    // The base command should be auto-approved (no pending)
+    // The base command should be auto-approved and actually run
     const result = await tool("run_bash").execute({ command: "echo hello | head -1", reason: "test" });
-    // Since there's no TTY, it would normally go to pendingBash, but the base is approved
-    // so it should actually run. Let's check the output format.
-    assert.ok(!String(result).includes("Waiting for the user to approve"));
-    assert.equal(c.session.pendingBash, null);
+    // Should execute successfully, not refuse due to no TTY
+    assert.ok(!String(result).includes("Cannot execute"));
+  });
+
+  test("auto-approves all commands when session.approveAllBash is true", async () => {
+    const c = useContext({
+      session: { mode: "act", approveAllBash: true },
+      projectCfg: { alwaysApprove: [] },
+    });
+    
+    // Any command should be auto-approved when approveAllBash is set
+    const result = await tool("run_bash").execute({ command: "echo test", reason: "test" });
+    // Should execute successfully, not refuse due to no TTY
+    assert.ok(!String(result).includes("Cannot execute"));
   });
 
   test("workingDirectory runs command in subdirectory", async () => {

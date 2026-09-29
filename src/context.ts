@@ -76,11 +76,6 @@ export interface ProjectConfig {
   alwaysApprove: string[];
 }
 
-export interface PendingBash {
-  command: string;
-  reason: string;
-}
-
 /**
  * Tokens this session has moved. `input` is the whole prompt volume, cached or not —
  * which is what an OpenAI-shaped API reports natively, so it is taken as given rather
@@ -106,13 +101,13 @@ export interface Session {
   announcedMode: Mode | null;
   messages: Message[];
   usage: Usage;
-  pendingBash: PendingBash | null;
   /** Set when the user declines interactively; the turn ends and they get the editor. */
   declinedCommand: string | null;
   /** Tool calls made during a turn the user interrupted, as display labels. Reported in
    *  the transcript on the way out and cleared once the model has been told. */
   interrupted: string[] | null;
-  approvedOnce: string[];
+  /** When true, all bash commands are auto-approved for this session. */
+  approveAllBash: boolean;
 }
 
 /**
@@ -144,6 +139,23 @@ export function saveProjectConfig(cfg: Config, projectCfg: ProjectConfig): void 
   const dir = path.resolve(CWD, cfg.sessionDir);
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, "project.json"), `${JSON.stringify(projectCfg, null, 2)}\n`);
+}
+
+export function sessionDir(cfg: Config): string {
+  return path.resolve(CWD, cfg.sessionDir);
+}
+
+export function jsonPath(cfg: Config, id: string): string {
+  return path.join(sessionDir(cfg), `${id}.json`);
+}
+
+export function mdPath(cfg: Config, id: string): string {
+  return path.join(sessionDir(cfg), `${id}.md`);
+}
+
+export function saveSession(cfg: Config, s: Session): void {
+  fs.mkdirSync(sessionDir(cfg), { recursive: true });
+  fs.writeFileSync(jsonPath(cfg, s.id), `${JSON.stringify(s, null, 2)}\n`);
 }
 
 /** Tools are instantiated by NodeLLM from bare classes, so they cannot be handed

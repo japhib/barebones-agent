@@ -47,8 +47,7 @@ Every run prints the exact command to continue:
 | `--code-review` | Review code changes in current branch; automatically uses plan mode |
 | `--plan` / `--act` | Switch mode; persists in the session |
 | `--model <alias>` | A `model_name` from the proxy's `model_list`; sticks to the session |
-| `--approve` | Run the pending shell command once (non-interactive fallback) |
-| `--always-approve` | Run it, and never ask for that exact command again |
+| `--approve-all` | Auto-approve all bash commands for this session |
 | `--decline [reason]` | Refuse it; with no reason, hands control back to you |
 | `--timeout <s>` | Per-request limit for the model API (default 600s) |
 | `--bash-timeout <s>` | Limit for a single `run_bash` command (default 120s) |
@@ -277,18 +276,19 @@ waits for a single keypress, without ending the turn:
 run_bash wants to run:
   npm test
   Verify the refactor before moving on.
-  [y/space/enter] run once   [a] always allow this command   [n] decline
+  [y/space/enter] run once   [a] always allow this command   [A] allow all for session   [n] decline
   → approved
 ```
 
 `y`, space, or enter runs it and the agent carries on in the same process — no re-invoke,
 no re-sending the history. `a` also appends it to `alwaysApprove` in the project config, so it is never
-asked again in this project. Only **`n`** ends the turn, writing a `## Declined` block
-and handing you the editor to say what to do instead.
+asked again in this project. `A` (shift-A) approves all bash commands for the rest of this
+session without persisting to the config. Only **`n`** ends the turn, writing a `## Declined`
+block and handing you the editor to say what to do instead.
 
-With no terminal to ask on — piped stdin, a cron job, CI — it falls back to the
-transcript flow instead of hanging: the request is written out and the turn ends, to be
-answered with `--approve`, `--always-approve` or `--decline [reason]` on the next run.
+With no terminal to ask on — piped stdin, a cron job, CI — the command is refused and
+the turn ends. Use `--approve-all` when starting the session to auto-approve all bash
+commands in non-interactive environments.
 
 ## The proxy
 

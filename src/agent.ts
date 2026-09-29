@@ -27,15 +27,18 @@ import {
   DEFAULT_REQUEST_TIMEOUT_MS,
   MAX_READ_LINES,
   PLACEHOLDER_API_KEY,
+  jsonPath,
+  mdPath,
   runHook,
   saveConfig,
   saveProjectConfig,
+  saveSession,
+  sessionDir,
   setContext,
   zeroUsage,
   type Config,
   type Interrupt,
   type Mode,
-  type PendingBash,
   type ProjectConfig,
   type Renderer,
   type Session,
@@ -195,15 +198,7 @@ export function resolveEditor(cliEditor: string | undefined, cfg: Config): strin
 
 // ---------------------------------------------------------------- session
 
-function sessionDir(cfg: Config): string {
-  return path.resolve(CWD, cfg.sessionDir);
-}
-function jsonPath(cfg: Config, id: string): string {
-  return path.join(sessionDir(cfg), `${id}.json`);
-}
-function mdPath(cfg: Config, id: string): string {
-  return path.join(sessionDir(cfg), `${id}.md`);
-}
+
 
 /** Max characters to read from AGENTS.md / README.md for project context. */
 const MAX_PROJECT_CONTEXT = 20_000;
@@ -243,10 +238,9 @@ function newSession(model: string, mode: Mode): Session {
     announcedMode: null,
     messages: [],
     usage: zeroUsage(),
-    pendingBash: null,
     declinedCommand: null,
     interrupted: null,
-    approvedOnce: [],
+    approveAllBash: false,
   };
 }
 
@@ -356,13 +350,8 @@ export function listSessions(cfg: Config): void {
 
   process.stdout.write(`${found.length} session${found.length === 1 ? "" : "s"} under ${rel}/\n`);
   for (const { s, mtimeMs } of found) {
-    // A halted session resumes through the flag that unblocks it, not through -e.
-    const waiting = s.pendingBash
-      ? "  \u26a0 awaiting approval"
-      : s.interrupted
-        ? "  \u23f8 interrupted"
-        : "";
-    const next = s.pendingBash ? "--approve" : "-e";
+    const waiting = s.interrupted ? "  \u23f8 interrupted" : "";
+    const next = "-e";
     const meta = `${ago(mtimeMs)} \u00b7 ${s.mode} \u00b7 ${s.model} \u00b7 ${s.usage.turns} turn${s.usage.turns === 1 ? "" : "s"}`;
     process.stdout.write(
       `\n  ${s.id}  ${dim(meta)}${waiting}\n` +
@@ -388,10 +377,7 @@ export function slim(messages: readonly Message[]): Message[] {
     });
 }
 
-function saveSession(cfg: Config, s: Session): void {
-  fs.mkdirSync(sessionDir(cfg), { recursive: true });
-  fs.writeFileSync(jsonPath(cfg, s.id), `${JSON.stringify(s, null, 2)}\n`);
-}
+
 
 // ---------------------------------------------------------------- transcript
 
@@ -423,23 +409,6 @@ function ensurePromptStub(cfg: Config, s: Session): void {
   if (!text.includes(`\n${YOU}\n`) || readPromptFromTranscript(cfg, s) !== "") {
     appendTranscript(cfg, s, `\n${YOU}\n\n${PROMPT_STUB}\n`);
   }
-}
-
-export function renderApproval(b: PendingBash, s: Session): string {
-  const run = `${invocation()} -s ${s.id}`;
-  return [
-    `\n## ⚠️  Approval required\n`,
-    `The agent wants to run:\n`,
-    "```sh",
-    b.command,
-    "```\n",
-    `**Why:** ${b.reason}\n`,
-    "```",
-    `${run} --approve          run it once`,
-    `${run} --always-approve   run it, and never ask for this command again`,
-    `${run} --decline          refuse, and tell it what to do instead`,
-    "```\n",
-  ].join("\n");
 }
 
 /**
@@ -866,8 +835,7 @@ const HELP = `barebones-agent — one turn of work per invocation.
   --code-review                   review code changes in current branch (sets plan mode)
   --plan / -p | --act / -a        switch mode (persists in the session). Default: act mode
   -m / --model <alias>            a model_name from the proxy's model_list
-  --approve | --always-approve    allow the pending shell command
-  --decline [reason]              refuse it; with no reason, hands back to you
+  --approve-all                   auto-approve all bash commands for this session
   --timeout <s>                   per-request limit for the model API
   --bash-timeout <s>              limit for a single run_bash command
   --quiet                         no progress output (including the token line)
@@ -890,9 +858,7 @@ async function main(cfg: Config): Promise<void> {
       plan: { type: "boolean", short: "p" },
       act: { type: "boolean", short: "a" },
       "code-review": { type: "boolean" },
-      approve: { type: "boolean" },
-      "always-approve": { type: "boolean" },
-      decline: { type: "boolean" },
+      "approve-all": { type: "boolean" },
       model: { type: "string", short: "m" },
       editor: { type: "string" },
       timeout: { type: "string" },
@@ -975,37 +941,11 @@ async function main(cfg: Config): Promise<void> {
   let prompt = "";
 
   // --- resolve where this turn's prompt comes from -------------------------
-  const pending = session.pendingBash;
-  if (values.approve || values["always-approve"]) {
-    if (!pending) die(`Nothing is awaiting approval in session ${session.id}.`);
-    // Extract base command for approval — variations with pipes/redirects are also approved
-    const { base: baseCmd } = extractBaseCommand(pending.command);
-    if (values["always-approve"]) {
-      if (!projectCfg.alwaysApprove.includes(baseCmd)) {
-        projectCfg.alwaysApprove.push(baseCmd);
-      }
-      saveProjectConfig(cfg, projectCfg);
-    } else {
-      session.approvedOnce.push(baseCmd);
-    }
-    session.pendingBash = null;
-    prompt = `Approved. Run \`${pending.command}\` and continue.`;
-    appendTranscript(cfg, session, `\n**Approved:** \`${pending.command}\`\n`);
-  } else if (values.decline) {
-    if (!pending) die(`Nothing is awaiting approval in session ${session.id}.`);
-    session.pendingBash = null;
-    const reason = positionals.join(" ").trim();
-    appendTranscript(cfg, session, `\n**Declined:** \`${pending.command}\`\n`);
-    const note = `The user declined to run \`${pending.command}\`. Do not try to run it again.`;
-    if (!reason) {
-      // No guidance given, so hand control back rather than letting it guess.
-      appendTranscript(cfg, session, `\n${YOU}\n\n<!-- tell the agent what to do instead -->\n`);
-      saveSession(cfg, session);
-      process.stdout.write(`Declined \`${pending.command}\`.\n\n↻  ${resume} -e\n`);
-      return;
-    }
-    prompt = `${note} ${reason}`;
-  } else if (values["code-review"]) {
+  if (values["approve-all"]) {
+    session.approveAllBash = true;
+    // Flag is set; continue with normal prompt handling
+  }
+  if (values["code-review"]) {
     // --code-review: use CODE_REVIEW_PROMPT, append any user prompt
     const userPrompt = positionals.length
       ? positionals.join(" ")
@@ -1218,13 +1158,9 @@ async function main(cfg: Config): Promise<void> {
   session.usage = addUsage(session.usage, spent);
   session.messages = slim(chat.history);
 
-  // A halted turn ends with plumbing text ("Waiting for the user to approve: ..."),
-  // not an answer, so the block the user must act on is shown in its place.
+  // A halted turn (declined command) needs special handling.
   let shown: string;
-  if (session.pendingBash) {
-    shown = renderApproval(session.pendingBash, session);
-    appendTranscript(cfg, session, shown);
-  } else if (session.declinedCommand) {
+  if (session.declinedCommand) {
     shown = `Declined \`${session.declinedCommand}\`. Tell the agent what to do instead.`;
     appendTranscript(
       cfg,
@@ -1242,8 +1178,7 @@ async function main(cfg: Config): Promise<void> {
   render(shown, cfg);
 
   reportUsage(spent, session, values);
-  const next = session.pendingBash ? " --approve" : " -e";
-  process.stdout.write(`\n${session.mode} mode · continue with:\n↻  ${resume}${next}\n`);
+  process.stdout.write(`\n${session.mode} mode · continue with:\n↻  ${resume} -e\n`);
 }
 
 /**
