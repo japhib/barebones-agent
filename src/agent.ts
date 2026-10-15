@@ -574,6 +574,12 @@ For new tests: (Inherently medium/low priority if it deals with tests rather tha
 
 Any changes to a Temporal workflow must be gated behind a version check. (Correctness, medium priority if they're not)
 
+If the PR is for decommissioning or replacing a Temporal workflow in the 'payments' repo, use the following guidelines:
+- Read the code of the corresponding existing Temporal workflow (located under 'pkg/workflows')
+- The new code should EXACTLY follow the existing Temporal workflow logic; the one exception is converting to use the 'wcore' library for context management, logging, and error handling.
+- Any improvements should be saved for a follow-up PR.
+- Note the retry strategy used in the Temporal workflow. The new implementation will probably not use retries, and that's okay, but if anything has more than 2 retries, point it out as a low-priority finding.
+
 For security-related findings, only say something is a security concern if it's plausibly exploitable by an external user now (not in some hypothetical future state).
 
 For new/changed queries, examine the performance impact of the query changes based on what you know about the DB being used in the service. (Investigate the DB structure as needed.)
@@ -982,7 +988,7 @@ async function main(cfg: Config): Promise<void> {
         ? fs.readFileSync(values.file, "utf8").trim()
         : "";
     prompt = userPrompt
-      ? `${CODE_REVIEW_PROMPT}\n\n${userPrompt}`
+      ? `${CODE_REVIEW_PROMPT}\n\n## Additional instructions specifically for THIS code review\n\n${userPrompt}`
       : CODE_REVIEW_PROMPT;
     // Force plan mode for code review
     session.mode = "plan";
