@@ -518,6 +518,8 @@ Examine all the changes output by the git_diff tool. DO NOT run any bash command
 
 For the output of your code review, keep your comments focused on what has actually changed in the current branch. Only comment on something in pre-existing code if there is a high-priority change that needs to be made - and in that case, make it clear that you are commenting on pre-existing code rather than something that has changed in the current branch.
 
+DO NOT write, edit, or delete any files. DO NOT run tests or typecheck.
+
 Structure your output like this:
 
 [example output]
@@ -526,7 +528,24 @@ Structure your output like this:
 
 ## Summary of changes
 
-{Give a full summary of everything that has changed. Say whether the changes have corresponding changes in the automated tests.}
+{
+  Give a full summary of everything that has changed. Say whether the changes
+  have corresponding changes in the automated tests. Ideally all changes should
+  have both unit and integration tests.
+
+  Give a simple explanation of any flows that are added or changed, so that the
+  human reviewing your output can see how changes across files fit together.
+
+  Order the explanation starting from the external (API call or async consumer) level,
+  then going to the middle service/handler level, then go down to the DB level and call
+  out SQL changes that have been made. Lastly, comment on configuration or setup changes
+  (often in main.go) that may have been changed.
+
+  Be sure to call out where the changed code interacts with external systems;
+  are there new services or libraries being added as dependencies? Are we
+  consuming from or producing from a queue or Kafka or anything along those lines?
+  Are we following best practices?
+}
 
 ## Findings
 
@@ -534,21 +553,31 @@ Structure your output like this:
   Group all criticisms by:
   - category (correctness, performance, security, maintainability, readability, etc.)
   - priority (critical, high, medium, low) using appropriate '###' headings
-
-  Be selective when assigning a finding to "critical" or "high" priority - only use this category for things that are critical NOW, not if it might be critical in the future. Anything
-  that is only applicable in a hypothetical future state is automatically "low" priority.
-
-  Avoid giving any purely-stylistic nitpicks, except if something is clearly un-idiomatic for the programming language being used.
-  
-  For new test functions, check if they should actually be new test cases in an existing table-driven test. (This is a low-priority finding.)
-
-  For security-related findings, only say something is a security concern if it's plausibly exploitable by an external user now (not in some hypothetical future state).
-
-  For new/changed queries, examine the performance impact of the query changes based on what you know about the DB being used in the service. (Investigate the DB structure as needed.)
-  Comment on whether new indices might be needed for the changed query in its current state.
 }
 
 [/example output]
+
+## Notes
+
+Be selective when assigning a finding to "critical" or "high" priority - only
+  use this category for things that are critical NOW, not if it might be
+  critical in the future. Anything that is only applicable in a hypothetical
+  future state is automatically "low" priority.
+
+Avoid giving any purely-stylistic nitpicks, except if something is clearly un-idiomatic for the programming language being used.
+
+For new tests: (Inherently medium/low priority if it deals with tests rather than the production code)
+  - Check if new test functions should actually be new test cases in an existing table-driven test.
+  - Check if new test files should be added to an existing test file instead, and if they follow test file naming conventions for the repo.
+  - New tests should ideally hit a real DB instance, rather than mocking out a querier.
+  - New tests should mock out the smallest amount possible, leaning towards integration tests rather than purely unit tests. It's fine to mock out an external API dependency. It's usually bad practice to mock out a dependency that lives within the same codebase, unless specifically needed for testing hard-to-trigger error conditions or similar (network failure etc).
+
+Any changes to a Temporal workflow must be gated behind a version check. (Correctness, medium priority if they're not)
+
+For security-related findings, only say something is a security concern if it's plausibly exploitable by an external user now (not in some hypothetical future state).
+
+For new/changed queries, examine the performance impact of the query changes based on what you know about the DB being used in the service. (Investigate the DB structure as needed.)
+Comment on whether new indices might be needed for the changed query in its current state.
 `
 
 export function modeMessage(mode: Mode): string {
